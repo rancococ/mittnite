@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && (amd64 || arm64)
 
 package proc
 
@@ -13,8 +13,9 @@ import (
 )
 
 // siginfo mirrors the kernel's siginfo_t layout for child-exit events on
-// 64-bit platforms (amd64, arm64). Only the fields up to Status are read;
-// the trailing padding brings the struct to the 128 bytes the kernel writes.
+// the 64-bit platforms this file is built for (see build constraint; 32-bit
+// layouts differ). Only the fields up to Status are read; the trailing
+// padding brings the struct to the 128 bytes the kernel writes.
 type siginfo struct {
 	Signo  int32
 	Errno  int32
@@ -56,7 +57,11 @@ func ReapZombies() {
 func reapZombies() {
 	for {
 		pid, err := peekZombie()
-		if err != nil || pid == 0 {
+		if err != nil {
+			log.WithError(err).Warn("failed to check for zombie processes")
+			return
+		}
+		if pid == 0 {
 			return
 		}
 
