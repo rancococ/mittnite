@@ -154,16 +154,20 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 
 	// Only set job.cmd if cmd.Start() was successful
 	job.cmd = cmd
+	registerManagedPid(cmd.Process.Pid, job.Config.Name)
 
 	if process != nil {
 		process <- job.cmd.Process
 	}
 
+	// buffered so the wait goroutine can always deliver its result and exit,
+	// even when startOnce returns through the force-kill path without reading
 	errChan := make(chan error, 1)
-	defer close(errChan)
 
 	go func() {
-		errChan <- job.cmd.Wait()
+		err := job.cmd.Wait()
+		unregisterManagedPid(cmd.Process.Pid)
+		errChan <- err
 	}()
 
 	select {
