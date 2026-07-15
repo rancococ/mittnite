@@ -2,6 +2,7 @@ package proc
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"syscall"
@@ -31,7 +32,13 @@ func (job *LazyJob) AssertStarted(ctx context.Context) error {
 	e := make(chan error)
 
 	go func() {
-		if err := job.startOnce(ctx, p); err != nil {
+		err := job.startOnce(ctx, p)
+		switch {
+		case err == nil:
+			l.Info("process terminated")
+		case errors.Is(err, ProcessStoppedIntentionallyError):
+			l.Info("process stopped after cool-down")
+		default:
 			l.WithError(err).Error("process terminated with error")
 
 			select {
@@ -39,8 +46,6 @@ func (job *LazyJob) AssertStarted(ctx context.Context) error {
 			default:
 			}
 		}
-
-		l.Info("process terminated")
 
 		job.lazyStartLock.Lock()
 		defer job.lazyStartLock.Unlock()
@@ -77,13 +82,16 @@ func (job *LazyJob) Run(ctx context.Context, errors chan<- error) error {
 		}()
 	}
 
-	job.startProcessReaper(ctx)
+	job.startCoolDownWatcher(ctx)
 
 	log.Infof("holding off starting job %s until first request", job.Config.Name)
 	return nil
 }
 
-func (job *LazyJob) startProcessReaper(ctx context.Context) {
+// startCoolDownWatcher stops the job's process once it has been idle for
+// longer than the configured cool-down timeout; the next connection spins it
+// up again. Not to be confused with the zombie reaper in reaper_linux.go.
+func (job *LazyJob) startCoolDownWatcher(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Minute)
 	go func() {
 		for {
@@ -95,8 +103,8 @@ func (job *LazyJob) startProcessReaper(ctx context.Context) {
 					continue
 				}
 
-				diff := time.Since(job.lastConnectionClosed)
-				if diff < job.coolDownTimeout {
+				idle := time.Since(job.lastConnectionClosed)
+				if idle < job.coolDownTimeout {
 					continue
 				}
 
@@ -106,6 +114,11 @@ func (job *LazyJob) startProcessReaper(ctx context.Context) {
 
 				job.lazyStartLock.Lock()
 
+				log.WithField("job.name", job.Config.Name).
+					WithField("idle.duration", idle.Round(time.Second).String()).
+					Info("stopping idle lazy job after cool-down timeout")
+
+				job.stopExpected = true
 				job.Signal(syscall.SIGTERM)
 
 				job.lazyStartLock.Unlock()

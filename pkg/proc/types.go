@@ -76,13 +76,14 @@ type baseJob struct {
 	stdErrWg  sync.WaitGroup
 	stdOutWg  sync.WaitGroup
 
-	cmd       *exec.Cmd
-	restart   bool
-	stop      bool
-	stdout    *os.File
-	stderr    *os.File
-	lastError error
-	phase     JobPhase
+	cmd          *exec.Cmd
+	restart      bool
+	stop         bool
+	stopExpected bool
+	stdout       *os.File
+	stderr       *os.File
+	lastError    error
+	phase        JobPhase
 }
 
 type BootJob struct {

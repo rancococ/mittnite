@@ -82,7 +82,7 @@ func (job *CommonJob) Run(ctx context.Context, _ chan<- error) error {
 		case ProcessWillBeRestartedError:
 			l.Info("restart process")
 			continue
-		case ProcessWillBeStoppedError:
+		case ProcessWillBeStoppedError, ProcessStoppedIntentionallyError:
 			l.Info("stop process")
 			job.phase.Set(JobPhaseReasonStopped)
 			return nil
