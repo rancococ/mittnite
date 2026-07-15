@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,7 +30,9 @@ func (job *LazyJob) AssertStarted(ctx context.Context) error {
 	}
 
 	p := make(chan *os.Process)
-	e := make(chan error)
+	// buffered so a startOnce failure is never dropped, even when it happens
+	// before the select below starts receiving
+	e := make(chan error, 1)
 
 	go func() {
 		err := job.startOnce(ctx, p)
@@ -40,11 +43,7 @@ func (job *LazyJob) AssertStarted(ctx context.Context) error {
 			l.Info("process stopped after cool-down")
 		default:
 			l.WithError(err).Error("process terminated with error")
-
-			select {
-			case e <- err:
-			default:
-			}
+			e <- err
 		}
 
 		job.lazyStartLock.Lock()
@@ -92,14 +91,16 @@ func (job *LazyJob) Run(ctx context.Context, errors chan<- error) error {
 // longer than the configured cool-down timeout; the next connection spins it
 // up again. Not to be confused with the zombie reaper in reaper_linux.go.
 func (job *LazyJob) startCoolDownWatcher(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Minute)
 	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if job.activeConnections > 0 {
+				if atomic.LoadUint32(&job.activeConnections) > 0 {
 					continue
 				}
 
@@ -118,7 +119,7 @@ func (job *LazyJob) startCoolDownWatcher(ctx context.Context) {
 					WithField("idle.duration", idle.Round(time.Second).String()).
 					Info("stopping idle lazy job after cool-down timeout")
 
-				job.stopExpected = true
+				job.stopExpected.Store(true)
 				job.Signal(syscall.SIGTERM)
 
 				job.lazyStartLock.Unlock()

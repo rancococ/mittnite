@@ -107,7 +107,7 @@ func (job *baseJob) StreamStdOutAndStdErr(ctx context.Context, outChan chan []by
 
 func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) error {
 	l := log.WithField("job.name", job.Config.Name)
-	job.stopExpected = false
+	job.stopExpected.Store(false)
 	defer job.closeStdFiles()
 
 	if err := job.CreateAndOpenStdFile(job.Config); err != nil {
@@ -195,8 +195,8 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 		}
 
 		if err != nil {
-			if job.stopExpected && terminatedBySignal(err, syscall.SIGTERM) {
-				job.stopExpected = false
+			if job.stopExpected.Load() && terminatedBySignal(err, syscall.SIGTERM) {
+				job.stopExpected.Store(false)
 				l.Info("process stopped as requested")
 				return ProcessStoppedIntentionallyError
 			}

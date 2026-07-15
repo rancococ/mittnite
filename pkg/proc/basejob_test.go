@@ -2,6 +2,7 @@ package proc
 
 import (
 	"context"
+	"os"
 	"syscall"
 	"testing"
 	"time"
@@ -20,14 +21,20 @@ func startTestJob(t *testing.T) (*baseJob, chan error) {
 	})
 	require.NoError(t, err)
 
+	// receiving from the process channel synchronizes with startOnce having
+	// set job.cmd, so the job can safely be signaled afterwards
+	p := make(chan *os.Process, 1)
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- job.startOnce(context.Background(), nil)
+		errChan <- job.startOnce(context.Background(), p)
 	}()
 
-	require.Eventually(t, func() bool {
-		return job.cmd != nil && job.cmd.Process != nil && syscall.Kill(job.cmd.Process.Pid, 0) == nil
-	}, 5*time.Second, 20*time.Millisecond, "process should be running")
+	select {
+	case proc := <-p:
+		require.NotNil(t, proc, "process should be running")
+	case <-time.After(5 * time.Second):
+		t.Fatal("process did not start")
+	}
 
 	return job, errChan
 }
@@ -35,7 +42,7 @@ func startTestJob(t *testing.T) (*baseJob, chan error) {
 func TestStartOnceReportsExpectedStopAsIntentional(t *testing.T) {
 	job, errChan := startTestJob(t)
 
-	job.stopExpected = true
+	job.stopExpected.Store(true)
 	job.Signal(syscall.SIGTERM)
 
 	select {

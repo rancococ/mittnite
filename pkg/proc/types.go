@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -79,7 +80,7 @@ type baseJob struct {
 	cmd          *exec.Cmd
 	restart      bool
 	stop         bool
-	stopExpected bool
+	stopExpected atomic.Bool
 	stdout       *os.File
 	stderr       *os.File
 	lastError    error
