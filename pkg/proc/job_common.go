@@ -20,8 +20,8 @@ const (
 )
 
 func (job *CommonJob) Init() {
-	job.restart = false
-	job.stop = false
+	job.restart.Store(false)
+	job.stop.Store(false)
 
 	for w := range job.Config.Watches {
 		watch := &job.Config.Watches[w]
@@ -44,7 +44,7 @@ func (job *CommonJob) Init() {
 }
 
 func (job *CommonJob) Run(ctx context.Context, _ chan<- error) error {
-	if job.stop {
+	if job.stop.Load() {
 		return nil
 	}
 
@@ -59,12 +59,12 @@ func (job *CommonJob) Run(ctx context.Context, _ chan<- error) error {
 
 	go func() {
 		for range p {
-			job.phase.Set(JobPhaseReasonStarted)
+			job.SetPhase(JobPhaseReasonStarted)
 		}
 	}()
 
 	for { // restart failed jobs as long mittnite is running
-		if job.stop {
+		if job.stop.Load() {
 			return nil
 		}
 
@@ -75,7 +75,7 @@ func (job *CommonJob) Run(ctx context.Context, _ chan<- error) error {
 		case nil:
 			if job.Config.OneTime {
 				l.Info("one-time job has ended successfully")
-				job.phase.Set(JobPhaseReasonCompleted)
+				job.SetPhase(JobPhaseReasonCompleted)
 				return nil
 			}
 			l.Warn("job exited without errors")
@@ -84,7 +84,7 @@ func (job *CommonJob) Run(ctx context.Context, _ chan<- error) error {
 			continue
 		case ProcessWillBeStoppedError, ProcessStoppedIntentionallyError:
 			l.Info("stop process")
-			job.phase.Set(JobPhaseReasonStopped)
+			job.SetPhase(JobPhaseReasonStopped)
 			return nil
 		}
 
@@ -98,7 +98,7 @@ func (job *CommonJob) Run(ctx context.Context, _ chan<- error) error {
 			currBackOff := backOff
 			backOff = calculateNextBackOff(currBackOff, maxBackOff)
 
-			job.phase.Set(JobPhaseReasonCrashLooping)
+			job.SetPhase(JobPhaseReasonCrashLooping)
 			l.
 				WithField("job.maxAttempts", maxAttempts).
 				WithField("job.usedAttempts", attempts).
@@ -109,7 +109,7 @@ func (job *CommonJob) Run(ctx context.Context, _ chan<- error) error {
 			continue
 		}
 
-		job.phase.Set(JobPhaseReasonFailed)
+		job.SetPhase(JobPhaseReasonFailed)
 
 		if job.Config.CanFail {
 			l.WithField("job.maxAttempts", maxAttempts).Warn("reached max retries")
@@ -203,13 +203,13 @@ func (job *CommonJob) IsRunning() bool {
 }
 
 func (job *CommonJob) Restart() {
-	job.restart = true
+	job.restart.Store(true)
 	job.SignalAll(syscall.SIGTERM)
 	job.interrupt()
 }
 
 func (job *CommonJob) Stop() {
-	job.stop = true
+	job.stop.Store(true)
 	job.SignalAll(syscall.SIGTERM)
 	job.interrupt()
 }
@@ -223,7 +223,7 @@ func (job *CommonJob) Status() *CommonJobStatus {
 	return &CommonJobStatus{
 		Pid:     pid,
 		Running: job.IsRunning(),
-		Phase:   job.phase,
+		Phase:   job.GetPhase(),
 		Config:  job.Config,
 	}
 }

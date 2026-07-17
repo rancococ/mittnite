@@ -78,7 +78,7 @@ func TestTickDoesNotRestartStoppedJob(t *testing.T) {
 	runner.waitGroup = &sync.WaitGroup{}
 
 	// Simulate a job that was explicitly stopped via `mittnitectl job stop`.
-	runner.jobs[0].GetPhase().Set(JobPhaseReasonStopped)
+	runner.jobs[0].SetPhase(JobPhaseReasonStopped)
 
 	runner.tick()
 
@@ -107,7 +107,7 @@ func TestTickDoesNotRestartCompletedOneTimeJob(t *testing.T) {
 	runner.errChan = make(chan error, 16)
 	runner.waitGroup = &sync.WaitGroup{}
 
-	runner.jobs[0].GetPhase().Set(JobPhaseReasonCompleted)
+	runner.jobs[0].SetPhase(JobPhaseReasonCompleted)
 
 	runner.tick()
 

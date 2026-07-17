@@ -78,13 +78,15 @@ type baseJob struct {
 	stdOutWg  sync.WaitGroup
 
 	cmd          *exec.Cmd
-	restart      bool
-	stop         bool
+	restart      atomic.Bool
+	stop         atomic.Bool
 	stopExpected atomic.Bool
 	stdout       *os.File
 	stderr       *os.File
 	lastError    error
-	phase        JobPhase
+
+	phaseMu sync.Mutex
+	phase   JobPhase
 }
 
 type BootJob struct {
@@ -127,7 +129,8 @@ type Job interface {
 	Watch()
 	Reset()
 
-	GetPhase() *JobPhase
+	GetPhase() JobPhase
+	SetPhase(JobPhaseReason)
 	GetName() string
 }
 
@@ -137,7 +140,7 @@ func (job *baseJob) init(jobConfig *config.BaseJobConfig) error {
 	job.Config = jobConfig
 	job.stdout = os.Stdout
 	job.stderr = os.Stderr
-	job.phase.Set(JobPhaseReasonAwaitingReadiness)
+	job.SetPhase(JobPhaseReasonAwaitingReadiness)
 	if len(jobConfig.Stdout) == 0 {
 		return nil
 	}
