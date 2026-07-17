@@ -105,7 +105,7 @@ var up = &cobra.Command{
 			}
 		}()
 
-		go proc.ReapChildren()
+		go proc.ReapZombies()
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
