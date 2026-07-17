@@ -1,6 +1,8 @@
 package proc
 
 import (
+	"errors"
+	"os/exec"
 	"syscall"
 
 	log "github.com/sirupsen/logrus"
@@ -22,4 +24,15 @@ func decodeWaitStatus(s syscall.WaitStatus) log.Fields {
 	default:
 		return log.Fields{"exit.status": int(s)}
 	}
+}
+
+// terminatedBySignal reports whether err is an exec.ExitError caused by the
+// process dying from the given signal.
+func terminatedBySignal(err error, sig syscall.Signal) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled() && ws.Signal() == sig
 }

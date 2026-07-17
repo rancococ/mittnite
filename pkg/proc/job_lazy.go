@@ -2,8 +2,10 @@ package proc
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,19 +30,21 @@ func (job *LazyJob) AssertStarted(ctx context.Context) error {
 	}
 
 	p := make(chan *os.Process)
-	e := make(chan error)
+	// buffered so a startOnce failure is never dropped, even when it happens
+	// before the select below starts receiving
+	e := make(chan error, 1)
 
 	go func() {
-		if err := job.startOnce(ctx, p); err != nil {
+		err := job.startOnce(ctx, p)
+		switch {
+		case err == nil:
+			l.Info("process terminated")
+		case errors.Is(err, ProcessStoppedIntentionallyError):
+			l.Info("process stopped after cool-down")
+		default:
 			l.WithError(err).Error("process terminated with error")
-
-			select {
-			case e <- err:
-			default:
-			}
+			e <- err
 		}
-
-		l.Info("process terminated")
 
 		job.lazyStartLock.Lock()
 		defer job.lazyStartLock.Unlock()
@@ -77,26 +81,31 @@ func (job *LazyJob) Run(ctx context.Context, errors chan<- error) error {
 		}()
 	}
 
-	job.startProcessReaper(ctx)
+	job.startCoolDownWatcher(ctx)
 
-	log.Infof("holding off starting job %s until first request", job.Config.Name)
+	log.WithField("job.name", job.Config.Name).Info("holding off starting job until first request")
 	return nil
 }
 
-func (job *LazyJob) startProcessReaper(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Minute)
+// startCoolDownWatcher stops the job's process once it has been idle for
+// longer than the configured cool-down timeout; the next connection spins it
+// up again. Not to be confused with the zombie reaper in reaper_linux.go.
+func (job *LazyJob) startCoolDownWatcher(ctx context.Context) {
 	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if job.activeConnections > 0 {
+				if atomic.LoadUint32(&job.activeConnections) > 0 {
 					continue
 				}
 
-				diff := time.Since(job.lastConnectionClosed)
-				if diff < job.coolDownTimeout {
+				idle := time.Since(job.lastConnectionClosed)
+				if idle < job.coolDownTimeout {
 					continue
 				}
 
@@ -106,6 +115,11 @@ func (job *LazyJob) startProcessReaper(ctx context.Context) {
 
 				job.lazyStartLock.Lock()
 
+				log.WithField("job.name", job.Config.Name).
+					WithField("idle.duration", idle.Round(time.Second).String()).
+					Info("stopping idle lazy job after cool-down timeout")
+
+				job.stopExpected.Store(true)
 				job.Signal(syscall.SIGTERM)
 
 				job.lazyStartLock.Unlock()
