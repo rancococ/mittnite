@@ -74,7 +74,7 @@ var up = &cobra.Command{
 			return fmt.Errorf("failed while rendering files from ignition config, err: %w", err)
 		}
 
-		signals := make(chan os.Signal)
+		signals := make(chan os.Signal, 1)
 		signal.Notify(signals,
 			syscall.SIGTERM,
 			syscall.SIGINT,
