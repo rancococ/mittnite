@@ -64,13 +64,19 @@ func (job *CommonJob) Run(ctx context.Context, _ chan<- error) error {
 	}()
 
 	for { // restart failed jobs as long mittnite is running
-		if job.stop.Load() {
+		if job.stop.Load() || ctx.Err() != nil {
 			return nil
 		}
 
 		job.ctx, job.interrupt = context.WithCancel(context.Background())
 		startedAt := time.Now()
 		err := job.startOnce(ctx, p)
+		if ctx.Err() != nil {
+			// mittnite is shutting down; startOnce has already terminated the
+			// process (SIGTERM, then SIGKILL after the shutdown timeout)
+			job.SetPhase(JobPhaseReasonStopped)
+			return nil
+		}
 		switch err {
 		case nil:
 			if job.Config.OneTime {
@@ -105,7 +111,7 @@ func (job *CommonJob) Run(ctx context.Context, _ chan<- error) error {
 				WithField("job.nextRestartIn", currBackOff.String()).
 				Info("remaining attempts")
 
-			job.crashLoopSleep(currBackOff)
+			job.crashLoopSleep(ctx, currBackOff)
 			continue
 		}
 
@@ -246,21 +252,10 @@ func (job *CommonJob) executeWatchCommand(watchCmd *config.WatchCommand) error {
 	return cmd.Run()
 }
 
-func (job *CommonJob) crashLoopSleep(duration time.Duration) {
-	timeout := make(chan bool)
-
-	go func() {
-		defer close(timeout)
-		<-time.After(duration)
-		timeout <- true
-	}()
-
-	for {
-		select {
-		case <-timeout:
-			return
-		case <-job.ctx.Done():
-			return
-		}
+func (job *CommonJob) crashLoopSleep(ctx context.Context, duration time.Duration) {
+	select {
+	case <-time.After(duration):
+	case <-job.ctx.Done():
+	case <-ctx.Done():
 	}
 }
