@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mittwald/mittnite/internal/config"
+	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/require"
 )
@@ -120,6 +121,53 @@ func TestStartOnceDrainsPipeAfterLogTargetCloses(t *testing.T) {
 		_, err := os.Stat(marker)
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond, "lingering child should survive writing after the log target closed")
+}
+
+// An unset timestampFormat is the documented default (RFC3339) and must not
+// trigger the unknown-format warning.
+func TestResolveTimestampLayoutDefaultsToRFC3339WithoutWarning(t *testing.T) {
+	logHook := logtest.NewGlobal()
+	defer logHook.Reset()
+
+	job := &baseJob{Config: &config.BaseJobConfig{Name: "default-format-job"}}
+	layout := job.resolveTimestampLayout(log.WithField("job.name", job.Config.Name))
+
+	require.Equal(t, time.RFC3339, layout)
+	for _, entry := range logHook.AllEntries() {
+		require.NotEqual(t, log.WarnLevel, entry.Level, "unexpected warning: %s", entry.Message)
+	}
+}
+
+func TestResolveTimestampLayoutWarnsOnUnknownFormat(t *testing.T) {
+	logHook := logtest.NewGlobal()
+	defer logHook.Reset()
+
+	job := &baseJob{Config: &config.BaseJobConfig{
+		Name:            "unknown-format-job",
+		TimestampFormat: "bogus",
+	}}
+	layout := job.resolveTimestampLayout(log.WithField("job.name", job.Config.Name))
+
+	require.Equal(t, time.RFC3339, layout)
+
+	var warnings []string
+	for _, entry := range logHook.AllEntries() {
+		if entry.Level == log.WarnLevel {
+			warnings = append(warnings, entry.Message)
+		}
+	}
+	require.Contains(t, warnings, "unknown timestamp format, defaulting to RFC3339")
+}
+
+func TestResolveTimestampLayoutPrefersCustomFormat(t *testing.T) {
+	job := &baseJob{Config: &config.BaseJobConfig{
+		Name:                  "custom-format-job",
+		TimestampFormat:       "Kitchen",
+		CustomTimestampFormat: "2006-01-02",
+	}}
+	layout := job.resolveTimestampLayout(log.WithField("job.name", job.Config.Name))
+
+	require.Equal(t, "2006-01-02", layout)
 }
 
 func TestStartOnceReportsExpectedStopAsIntentional(t *testing.T) {

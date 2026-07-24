@@ -270,15 +270,21 @@ func (job *baseJob) resolveTimestampLayout(l *log.Entry) string {
 		return job.Config.CustomTimestampFormat
 	}
 
-	layout, exists := TimeLayouts[job.Config.TimestampFormat]
+	format := job.Config.TimestampFormat
+	if format == "" {
+		// documented default, must not hit the unknown-format warning below
+		format = "RFC3339"
+	}
+
+	layout, exists := TimeLayouts[format]
 	if !exists {
-		l.WithField("timestamp.format", job.Config.TimestampFormat).
+		l.WithField("timestamp.format", format).
 			WithField("timestamp.layout", time.RFC3339).
 			Warn("unknown timestamp format, defaulting to RFC3339")
 		return time.RFC3339
 	}
 
-	l.WithField("timestamp.format", job.Config.TimestampFormat).
+	l.WithField("timestamp.format", format).
 		WithField("timestamp.layout", layout).
 		Info("logging with timestamp layout")
 	return layout
