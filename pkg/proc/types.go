@@ -222,10 +222,11 @@ func NewLazyJob(c *config.JobConfig) (*LazyJob, error) {
 
 func NewBootJob(c *config.BootJobConfig) (*BootJob, error) {
 	bj := BootJob{
-		baseJob: baseJob{
-			Config: &c.BaseJobConfig,
-		},
 		Config: c,
+	}
+
+	if err := bj.baseJob.init(&c.BaseJobConfig); err != nil {
+		return nil, err
 	}
 
 	if ts := c.Timeout; ts != "" {

@@ -123,6 +123,18 @@ func TestStartOnceDrainsPipeAfterLogTargetCloses(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond, "lingering child should survive writing after the log target closed")
 }
 
+// Boot jobs used to skip baseJob.init, leaving job.stdout/job.stderr as typed
+// nil *os.File values; os/exec turns those into closed file descriptors in the
+// child, so all boot job output was silently lost.
+func TestNewBootJobInitializesStdStreams(t *testing.T) {
+	job, err := NewBootJob(&config.BootJobConfig{
+		BaseJobConfig: config.BaseJobConfig{Name: "boot-job", Command: "true"},
+	})
+	require.NoError(t, err)
+	require.Same(t, os.Stdout, job.stdout)
+	require.Same(t, os.Stderr, job.stderr)
+}
+
 // An unset timestampFormat is the documented default (RFC3339) and must not
 // trigger the unknown-format warning.
 func TestResolveTimestampLayoutDefaultsToRFC3339WithoutWarning(t *testing.T) {
