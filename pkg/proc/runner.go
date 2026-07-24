@@ -192,7 +192,7 @@ func (r *Runner) addJobIfNotExists(job Job) {
 }
 
 func (r *Runner) startJob(job Job, initialPhase JobPhaseReason) {
-	job.GetPhase().Set(initialPhase)
+	job.SetPhase(initialPhase)
 	phase := job.GetPhase()
 	if phase.Is(JobPhaseReasonStopped) || phase.Is(JobPhaseReasonFailed) || phase.Is(JobPhaseReasonCrashLooping) {
 		return
