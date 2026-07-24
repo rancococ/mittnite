@@ -52,7 +52,8 @@ func TestStartOnceKeepsLoggingOutputOfLingeringChildren(t *testing.T) {
 	logHook := logtest.NewGlobal()
 	defer logHook.Reset()
 
-	job, err := newBaseJob(&config.BaseJobConfig{
+	job := &baseJob{}
+	err := job.init(&config.BaseJobConfig{
 		Name: "lingering-job",
 		// the child traps TERM because startOnce signals the job's process
 		// group once the main process has exited; the main process sleeps
@@ -96,7 +97,8 @@ func TestStartOnceDrainsPipeAfterLogTargetCloses(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "marker")
 
-	job, err := newBaseJob(&config.BaseJobConfig{
+	job := &baseJob{}
+	err := job.init(&config.BaseJobConfig{
 		Name:    "draining-job",
 		Command: "sh",
 		// the second write happens well after the reader saw the closed log
