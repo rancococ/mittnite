@@ -153,9 +153,15 @@ job "foo" {
 
 Additionally, you can enable timestamps for the output of a job using `enableTimestamps` and specify a custom format using `timestampFormat`.
 
-Formats are named after their constant name in the Golang [`time` package](https://pkg.go.dev/time#pkg-constants) (lookup table at the bottom).
+Formats are named after their constant name in the Golang [`time` package](https://pkg.go.dev/time#pkg-constants) (lookup table at the bottom). The default is `RFC3339`.
 
 You can also specify your own format by setting `customTimestampFormat` to a custom format string like "2006-01-02 15:04:05". Whatever is set in `timestampFormat` will be ignored in that case.
+
+With `enableNamePrefix`, each output line is prefixed with the job's name. When both options are enabled, the timestamp comes first:
+
+```
+[2026-07-24T10:28:52Z] [foo] some output line
+```
 
 ```hcl
 job "foo" {
@@ -166,8 +172,11 @@ job "foo" {
   enableTimestamps = true
   timestampFormat = "RFC3339"  # default
   customTimestampFormat = ""  # default
+  enableNamePrefix = true  # defaults to false
 }
 ```
+
+Both options can also be enabled globally for all jobs (including boot jobs) with `mittnite up --job-log-timestamps --job-log-name-prefix`, or via the environment variables `MITTNITE_JOB_LOG_TIMESTAMPS` and `MITTNITE_JOB_LOG_NAME_PREFIX`. An explicit per-job `enableTimestamps` / `enableNamePrefix` — including an explicit `false` — always wins over the global switch.
 
 You can configure a Job to watch files and to send a signal to the managed process if that file changes. This can be used, for example, to send a `SIGHUP` to a process to reload its configuration file when it changes.
   
@@ -255,6 +264,8 @@ boot "setup" {
   ]
 }
 ```
+
+Boot jobs write to mittnite's stdout/stderr and support the same log options as regular jobs (`stdout`, `stderr`, `enableTimestamps`, `timestampFormat`, `customTimestampFormat`, `enableNamePrefix`).
 
 #### File
 
