@@ -107,13 +107,14 @@ func TestStartOnceDrainsPipeAfterLogTargetCloses(t *testing.T) {
 	err := job.init(&config.BaseJobConfig{
 		Name:    "draining-job",
 		Command: "sh",
-		// the second write happens well after the reader saw the closed log
-		// target; if the read end were closed by then, the write would raise
-		// SIGPIPE and the marker file would never be created. The main process
-		// sleeps briefly so the child has installed its TERM trap before
-		// startOnce signals the process group.
+		// the child outlives the one-second forwarder flush wait, so its
+		// second write happens well after the log target was closed; if the
+		// read end were closed by then, the write would raise SIGPIPE and the
+		// marker file would never be created. The main process sleeps briefly
+		// so the child has installed its TERM trap before startOnce signals
+		// the process group.
 		Args: []string{"-c", fmt.Sprintf(
-			"(trap '' TERM; sleep 0.3; echo lingering; sleep 0.3; echo again; : > %q) & echo main; sleep 0.2", marker,
+			"(trap '' TERM; sleep 0.3; echo lingering; sleep 1.2; echo again; : > %q) & echo main; sleep 0.2", marker,
 		)},
 		EnableTimestamps: boolPtr(true),
 		Stdout:           filepath.Join(dir, "stdout.log"),
@@ -210,6 +211,32 @@ func TestForwardOutputHandlesOverlongLines(t *testing.T) {
 	for _, entry := range logHook.AllEntries() {
 		require.NotEqual(t, "error reading from process", entry.Message)
 	}
+}
+
+// With a file-backed log target, startOnce waits for the forwarders to drain
+// the job's own final output into the file before closeStdFiles closes it;
+// the last lines of a job must not race into the discard path.
+func TestStartOnceFlushesFileTargetBeforeReturning(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "stdout.log")
+
+	job := &baseJob{}
+	err := job.init(&config.BaseJobConfig{
+		Name:             "flush-job",
+		Command:          "sh",
+		Args:             []string{"-c", "echo final-line"},
+		EnableTimestamps: boolPtr(true),
+		EnableNamePrefix: boolPtr(true),
+		Stdout:           logFile,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, job.startOnce(context.Background(), nil))
+
+	// deliberately no Eventually: the file must be complete when startOnce
+	// has returned
+	content, err := os.ReadFile(logFile)
+	require.NoError(t, err)
+	require.Regexp(t, `^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})\] \[flush-job\] final-line\n$`, string(content))
 }
 
 func TestStartOncePrefixesOutputWithTimestampAndJobName(t *testing.T) {

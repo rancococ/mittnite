@@ -160,8 +160,36 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 			namePrefix = []byte("[" + job.Config.Name + "] ")
 		}
 
-		go job.forwardOutput(stdoutReader, job.stdout, layout, namePrefix)
-		go job.forwardOutput(stderrReader, job.stderr, layout, namePrefix)
+		var forwardersDone sync.WaitGroup
+		forwardersDone.Add(2)
+		go func() {
+			defer forwardersDone.Done()
+			job.forwardOutput(stdoutReader, job.stdout, layout, namePrefix)
+		}()
+		go func() {
+			defer forwardersDone.Done()
+			job.forwardOutput(stderrReader, job.stderr, layout, namePrefix)
+		}()
+
+		// file-backed log targets are closed by the deferred closeStdFiles as
+		// soon as startOnce returns; let the forwarders drain the job's
+		// remaining output into them first, so its final lines are not lost
+		// to the discard path below. The readers see EOF as soon as the last
+		// write end is gone, so the full second is only spent when children
+		// outlive the job — their output is discarded, as before.
+		if len(job.Config.Stdout) > 0 || len(job.Config.Stderr) > 0 {
+			defer func() {
+				done := make(chan struct{})
+				go func() {
+					forwardersDone.Wait()
+					close(done)
+				}()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+				}
+			}()
+		}
 	} else {
 		cmd.Stdout = job.stdout
 		cmd.Stderr = job.stderr
