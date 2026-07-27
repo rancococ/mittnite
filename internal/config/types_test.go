@@ -89,6 +89,10 @@ func TestApplyJobLogDefaultsOffKeepsExplicitOptIn(t *testing.T) {
 
 	ign.ApplyJobLogDefaults(false, false)
 
+	// the accessors also return false for nil, so pin that the "off" default
+	// is materialized as an explicit false (visible in the job status API)
+	require.NotNil(t, ign.Jobs[0].EnableTimestamps)
+	require.NotNil(t, ign.Jobs[0].EnableNamePrefix)
 	require.False(t, ign.Jobs[0].TimestampsEnabled())
 	require.False(t, ign.Jobs[0].NamePrefixEnabled())
 	require.True(t, ign.Jobs[1].TimestampsEnabled())

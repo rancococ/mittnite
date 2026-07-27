@@ -201,9 +201,11 @@ func TestForwardOutputHandlesOverlongLines(t *testing.T) {
 
 	var buf bytes.Buffer
 	job := &baseJob{Config: &config.BaseJobConfig{Name: "long-line-job"}}
-	job.forwardOutput(io.NopCloser(strings.NewReader(input)), &buf, "2006", []byte("[long-line-job] "))
+	// the layout contains no time components, so the expected output is
+	// deterministic while the timestamp code path is still exercised
+	job.forwardOutput(io.NopCloser(strings.NewReader(input)), &buf, "T", []byte("[long-line-job] "))
 
-	prefix := fmt.Sprintf("[%d] [long-line-job] ", time.Now().Year())
+	prefix := "[T] [long-line-job] "
 	require.Equal(t,
 		prefix+"first\n"+prefix+payload+"\n"+prefix+"\n"+prefix+"last\n",
 		buf.String())

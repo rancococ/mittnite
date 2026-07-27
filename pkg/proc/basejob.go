@@ -339,7 +339,8 @@ func (job *baseJob) resolveTimestampLayout(l *log.Entry) string {
 // are forwarded in chunks — the prefixes are only written at the start of a
 // line and the newline only at its end — so overlong lines are split across
 // writes instead of aborting the forwarding (bufio.Scanner's token limit
-// would; a stopped reader lets the pipe fill up and block the child).
+// would abort it, and closing the read end would then kill the child with
+// SIGPIPE on its next write).
 func (job *baseJob) forwardOutput(r io.ReadCloser, w io.Writer, timestampLayout string, namePrefix []byte) {
 	defer r.Close()
 
