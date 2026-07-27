@@ -150,8 +150,8 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 		pipeWriteEnds = []*os.File{stdoutWriter, stderrWriter}
 
 		layout := job.resolveTimestampLayout(l)
-		go job.logWithTimestamp(stdoutReader, job.stdout, layout)
-		go job.logWithTimestamp(stderrReader, job.stderr, layout)
+		go job.forwardOutput(stdoutReader, job.stdout, layout)
+		go job.forwardOutput(stderrReader, job.stderr, layout)
 	} else {
 		cmd.Stdout = job.stdout
 		cmd.Stderr = job.stderr
@@ -290,31 +290,45 @@ func (job *baseJob) resolveTimestampLayout(l *log.Entry) string {
 	return layout
 }
 
-func (job *baseJob) logWithTimestamp(r io.ReadCloser, w io.Writer, layout string) {
+// forwardOutput copies process output from r to w line by line, prefixing
+// each line with a timestamp in the given layout. Lines longer than the read
+// buffer are forwarded in chunks — the timestamp is only written at the start
+// of a line and the newline only at its end — so overlong lines are split
+// across writes instead of aborting the forwarding (bufio.Scanner's token
+// limit would; a stopped reader lets the pipe fill up and block the child).
+func (job *baseJob) forwardOutput(r io.ReadCloser, w io.Writer, timestampLayout string) {
 	defer r.Close()
 
 	l := log.WithField("job.name", job.Config.Name)
 
-	scanner := bufio.NewScanner(r)
-	prefix := []byte{'['}
-	suffix := []byte{']', ' '}
-	newline := []byte{'\n'}
+	reader := bufio.NewReaderSize(r, 64*1024)
 
 	var timeBuffer []byte
 	var lineBuffer bytes.Buffer
+	continuation := false
 
-	for scanner.Scan() {
-		// Reuse time buffer, completly avoiding allocations
-		timeBuffer = timeBuffer[:0]
-		timeBuffer = time.Now().AppendFormat(timeBuffer, layout)
+	for {
+		line, isPrefix, err := reader.ReadLine()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				l.WithError(err).Error("error reading from process")
+			}
+			return
+		}
 
-		// Reset line buffer
 		lineBuffer.Reset()
-		lineBuffer.Write(prefix)
-		lineBuffer.Write(timeBuffer)
-		lineBuffer.Write(suffix)
-		lineBuffer.Write(scanner.Bytes())
-		lineBuffer.Write(newline)
+		if !continuation && timestampLayout != "" {
+			// reuse the time buffer to avoid per-line allocations
+			timeBuffer = time.Now().AppendFormat(timeBuffer[:0], timestampLayout)
+			lineBuffer.WriteByte('[')
+			lineBuffer.Write(timeBuffer)
+			lineBuffer.WriteString("] ")
+		}
+		lineBuffer.Write(line)
+		if !isPrefix {
+			lineBuffer.WriteByte('\n')
+		}
+		continuation = isPrefix
 
 		if _, err := w.Write(lineBuffer.Bytes()); err != nil {
 			if errors.Is(err, os.ErrClosed) {
@@ -328,10 +342,6 @@ func (job *baseJob) logWithTimestamp(r io.ReadCloser, w io.Writer, layout string
 			l.WithError(err).Error("error writing log line for process")
 			continue
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		l.WithError(err).Error("error reading from process")
 	}
 }
 

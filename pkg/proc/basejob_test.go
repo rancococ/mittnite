@@ -1,8 +1,10 @@
 package proc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,6 +182,30 @@ func TestResolveTimestampLayoutPrefersCustomFormat(t *testing.T) {
 	layout := job.resolveTimestampLayout(log.WithField("job.name", job.Config.Name))
 
 	require.Equal(t, "2006-01-02", layout)
+}
+
+// forwardOutput must not abort on lines longer than its read buffer: the
+// timestamp is written once per line, overlong lines arrive in chunks, and
+// empty as well as unterminated final lines are forwarded as lines.
+func TestForwardOutputHandlesOverlongLines(t *testing.T) {
+	logHook := logtest.NewGlobal()
+	defer logHook.Reset()
+
+	payload := strings.Repeat("a", 200*1024)
+	input := "first\n" + payload + "\n\nlast"
+
+	var buf bytes.Buffer
+	job := &baseJob{Config: &config.BaseJobConfig{Name: "long-line-job"}}
+	job.forwardOutput(io.NopCloser(strings.NewReader(input)), &buf, "2006")
+
+	year := fmt.Sprintf("[%d] ", time.Now().Year())
+	require.Equal(t,
+		year+"first\n"+year+payload+"\n"+year+"\n"+year+"last\n",
+		buf.String())
+
+	for _, entry := range logHook.AllEntries() {
+		require.NotEqual(t, "error reading from process", entry.Message)
+	}
 }
 
 func TestStartOnceReportsExpectedStopAsIntentional(t *testing.T) {
