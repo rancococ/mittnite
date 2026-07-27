@@ -162,13 +162,17 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 
 		var forwardersDone sync.WaitGroup
 		forwardersDone.Add(2)
+		// capture the targets outside the closures: when the flush wait below
+		// times out, these goroutines outlive startOnce, and a restart's
+		// CreateAndOpenStdFile reassigns job.stdout/job.stderr unsynchronized
+		stdout, stderr := job.stdout, job.stderr
 		go func() {
 			defer forwardersDone.Done()
-			job.forwardOutput(stdoutReader, job.stdout, layout, namePrefix)
+			job.forwardOutput(stdoutReader, stdout, layout, namePrefix)
 		}()
 		go func() {
 			defer forwardersDone.Done()
-			job.forwardOutput(stderrReader, job.stderr, layout, namePrefix)
+			job.forwardOutput(stderrReader, stderr, layout, namePrefix)
 		}()
 
 		// file-backed log targets are closed by the deferred closeStdFiles as
@@ -176,7 +180,8 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 		// remaining output into them first, so its final lines are not lost
 		// to the discard path below. The readers see EOF as soon as the last
 		// write end is gone, so the full second is only spent when children
-		// outlive the job — their output is discarded, as before.
+		// outlive the job — what they write within the window still reaches
+		// the file; only output after the close is discarded.
 		if len(job.Config.Stdout) > 0 || len(job.Config.Stderr) > 0 {
 			defer func() {
 				done := make(chan struct{})

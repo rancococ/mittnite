@@ -213,6 +213,31 @@ func TestForwardOutputHandlesOverlongLines(t *testing.T) {
 	}
 }
 
+// When the flush wait times out because a lingering child keeps the pipes
+// open, the forwarder goroutines outlive startOnce; a restart then reassigns
+// job.stdout/job.stderr via CreateAndOpenStdFile, so the forwarders must have
+// captured their targets with a proper happens-before edge (only fails under
+// -race).
+func TestStartOnceRestartDoesNotRaceWithLingeringForwarders(t *testing.T) {
+	job := &baseJob{}
+	err := job.init(&config.BaseJobConfig{
+		Name:    "restart-race-job",
+		Command: "sh",
+		// the child ignores TERM and holds the inherited pipe write ends open
+		// well past the flush wait without writing, so the forwarders never
+		// see EOF before the restart; the main process sleeps briefly so the
+		// trap is installed before startOnce signals the process group
+		Args:             []string{"-c", "(trap '' TERM; sleep 3) & sleep 0.2"},
+		EnableTimestamps: boolPtr(true),
+		Stdout:           filepath.Join(t.TempDir(), "stdout.log"),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, job.startOnce(context.Background(), nil))
+	// immediate restart, like CommonJob.Run does after ProcessWillBeRestartedError
+	require.NoError(t, job.startOnce(context.Background(), nil))
+}
+
 // With a file-backed log target, startOnce waits for the forwarders to drain
 // the job's own final output into the file before closeStdFiles closes it;
 // the last lines of a job must not race into the discard path.
