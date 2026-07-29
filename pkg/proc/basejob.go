@@ -341,7 +341,9 @@ func (job *baseJob) resolveTimestampLayout(l *log.Entry) string {
 // line and the newline only at its end — so overlong lines are split across
 // writes instead of aborting the forwarding (bufio.Scanner's token limit
 // would abort it, and closing the read end would then kill the child with
-// SIGPIPE on its next write).
+// SIGPIPE on its next write). The chunks are separate writes, so on a target
+// shared with other forwarders, their output can interleave between the
+// chunks of an overlong line.
 func (job *baseJob) forwardOutput(r io.ReadCloser, w io.Writer, timestampLayout string, namePrefix []byte) {
 	defer r.Close()
 

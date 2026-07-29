@@ -178,6 +178,8 @@ job "foo" {
 
 Both options can also be enabled globally for all jobs (including boot jobs) with `mittnite up --job-log-timestamps --job-log-name-prefix`, or via the environment variables `MITTNITE_JOB_LOG_TIMESTAMPS` and `MITTNITE_JOB_LOG_NAME_PREFIX`. An explicit per-job `enableTimestamps` / `enableNamePrefix` — including an explicit `false` — always wins over the global switch.
 
+With either option enabled, output is forwarded line by line. Single lines longer than 64 KiB are forwarded in multiple chunks; on a shared target, output of other jobs or streams may interleave between the chunks of such a line.
+
 You can configure a Job to watch files and to send a signal to the managed process if that file changes. This can be used, for example, to send a `SIGHUP` to a process to reload its configuration file when it changes.
   
 ```hcl
