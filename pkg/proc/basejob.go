@@ -292,8 +292,10 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 }
 
 func (job *baseJob) closeStdFiles() {
-	hasStdout := len(job.Config.Stdout) > 0
-	hasStderr := len(job.Config.Stderr) > 0 && job.Config.Stderr != job.Config.Stdout
+	// when opening a configured log file failed, job.stdout/job.stderr still
+	// point at the process-wide streams — never close those
+	hasStdout := len(job.Config.Stdout) > 0 && job.stdout != os.Stdout
+	hasStderr := len(job.Config.Stderr) > 0 && job.Config.Stderr != job.Config.Stdout && job.stderr != os.Stderr
 	if hasStdout {
 		job.stdout.Close()
 	}

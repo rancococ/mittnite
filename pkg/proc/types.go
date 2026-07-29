@@ -136,15 +136,15 @@ type Job interface {
 
 // init initializes the baseJob in place; baseJob must not be copied once
 // initialized, since it contains sync.WaitGroup and atomic.Bool fields.
-func (job *baseJob) init(jobConfig *config.BaseJobConfig) error {
+// Configured log files are not opened here — startOnce does that on every
+// start — so constructors stay free of file I/O and a broken log path of a
+// boot job can be rescued by its canFail handling instead of failing the
+// construction.
+func (job *baseJob) init(jobConfig *config.BaseJobConfig) {
 	job.Config = jobConfig
 	job.stdout = os.Stdout
 	job.stderr = os.Stderr
 	job.SetPhase(JobPhaseReasonAwaitingReadiness)
-
-	// no-ops for unset stdout/stderr, so it is safe to call unconditionally;
-	// stderr may be configured without stdout
-	return job.CreateAndOpenStdFile(jobConfig)
 }
 
 func (job *baseJob) CreateAndOpenStdFile(jobConfig *config.BaseJobConfig) error {
@@ -177,7 +177,12 @@ func NewCommonJob(c *config.JobConfig) (*CommonJob, error) {
 		Config: c,
 	}
 
-	if err := j.baseJob.init(&c.BaseJobConfig); err != nil {
+	j.baseJob.init(&c.BaseJobConfig)
+
+	// opening the configured log files here as well surfaces broken log paths
+	// at config load; no-ops for unset stdout/stderr, so it is safe to call
+	// unconditionally (stderr may be configured without stdout)
+	if err := j.baseJob.CreateAndOpenStdFile(&c.BaseJobConfig); err != nil {
 		return nil, err
 	}
 
@@ -191,7 +196,9 @@ func NewLazyJob(c *config.JobConfig) (*LazyJob, error) {
 		},
 	}
 
-	if err := j.baseJob.init(&c.BaseJobConfig); err != nil {
+	j.baseJob.init(&c.BaseJobConfig)
+
+	if err := j.baseJob.CreateAndOpenStdFile(&c.BaseJobConfig); err != nil {
 		return nil, err
 	}
 
@@ -225,9 +232,7 @@ func NewBootJob(c *config.BootJobConfig) (*BootJob, error) {
 		Config: c,
 	}
 
-	if err := bj.baseJob.init(&c.BaseJobConfig); err != nil {
-		return nil, err
-	}
+	bj.baseJob.init(&c.BaseJobConfig)
 
 	if ts := c.Timeout; ts != "" {
 		t, err := time.ParseDuration(ts)
