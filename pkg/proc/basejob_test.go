@@ -263,9 +263,14 @@ func TestStartOnceRestartDoesNotRaceWithLingeringForwarders(t *testing.T) {
 		Stdout:           filepath.Join(t.TempDir(), "stdout.log"),
 	})
 
+	start := time.Now()
 	require.NoError(t, job.startOnce(context.Background(), nil))
 	// immediate restart, like CommonJob.Run does after ProcessWillBeRestartedError
 	require.NoError(t, job.startOnce(context.Background(), nil))
+
+	// the flush wait is capped at one second per start; an unbounded wait
+	// would block on each child's 3s pipe hold and take over six seconds
+	require.Less(t, time.Since(start), 4500*time.Millisecond)
 }
 
 // With a file-backed log target, startOnce waits for the forwarders to drain
