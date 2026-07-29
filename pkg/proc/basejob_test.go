@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -17,6 +18,8 @@ import (
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/require"
 )
+
+func boolPtr(b bool) *bool { return &b }
 
 func startTestJob(t *testing.T) (*baseJob, chan error) {
 	t.Helper()
@@ -63,7 +66,7 @@ func TestStartOnceKeepsLoggingOutputOfLingeringChildren(t *testing.T) {
 		// briefly so the trap is installed before the signal arrives
 		Command:          "sh",
 		Args:             []string{"-c", "(trap '' TERM; sleep 0.3; echo lingering) & echo main; sleep 0.2"},
-		EnableTimestamps: true,
+		EnableTimestamps: boolPtr(true),
 	})
 	require.NoError(t, err)
 
@@ -112,7 +115,7 @@ func TestStartOnceDrainsPipeAfterLogTargetCloses(t *testing.T) {
 		Args: []string{"-c", fmt.Sprintf(
 			"(trap '' TERM; sleep 0.3; echo lingering; sleep 0.3; echo again; : > %q) & echo main; sleep 0.2", marker,
 		)},
-		EnableTimestamps: true,
+		EnableTimestamps: boolPtr(true),
 		Stdout:           filepath.Join(dir, "stdout.log"),
 	})
 	require.NoError(t, err)
@@ -185,8 +188,9 @@ func TestResolveTimestampLayoutPrefersCustomFormat(t *testing.T) {
 }
 
 // forwardOutput must not abort on lines longer than its read buffer: the
-// timestamp is written once per line, overlong lines arrive in chunks, and
-// empty as well as unterminated final lines are forwarded as lines.
+// timestamp and name prefix are written once per line, overlong lines arrive
+// in chunks, and empty as well as unterminated final lines are forwarded as
+// lines.
 func TestForwardOutputHandlesOverlongLines(t *testing.T) {
 	logHook := logtest.NewGlobal()
 	defer logHook.Reset()
@@ -196,16 +200,71 @@ func TestForwardOutputHandlesOverlongLines(t *testing.T) {
 
 	var buf bytes.Buffer
 	job := &baseJob{Config: &config.BaseJobConfig{Name: "long-line-job"}}
-	job.forwardOutput(io.NopCloser(strings.NewReader(input)), &buf, "2006")
+	job.forwardOutput(io.NopCloser(strings.NewReader(input)), &buf, "2006", []byte("[long-line-job] "))
 
-	year := fmt.Sprintf("[%d] ", time.Now().Year())
+	prefix := fmt.Sprintf("[%d] [long-line-job] ", time.Now().Year())
 	require.Equal(t,
-		year+"first\n"+year+payload+"\n"+year+"\n"+year+"last\n",
+		prefix+"first\n"+prefix+payload+"\n"+prefix+"\n"+prefix+"last\n",
 		buf.String())
 
 	for _, entry := range logHook.AllEntries() {
 		require.NotEqual(t, "error reading from process", entry.Message)
 	}
+}
+
+func TestStartOncePrefixesOutputWithTimestampAndJobName(t *testing.T) {
+	job := &baseJob{}
+	err := job.init(&config.BaseJobConfig{
+		Name:             "prefix-job",
+		Command:          "sh",
+		Args:             []string{"-c", "echo hello"},
+		EnableTimestamps: boolPtr(true),
+		EnableNamePrefix: boolPtr(true),
+	})
+	require.NoError(t, err)
+
+	// stand-in for the passthrough case (job.stdout = os.Stdout), which
+	// closeStdFiles leaves open when startOnce returns
+	logFile := filepath.Join(t.TempDir(), "stdout.log")
+	out, err := os.Create(logFile)
+	require.NoError(t, err)
+	defer out.Close()
+	job.stdout = out
+	job.stderr = out
+
+	require.NoError(t, job.startOnce(context.Background(), nil))
+
+	// the forwarder goroutine may still be flushing when startOnce returns
+	pattern := `^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})\] \[prefix-job\] hello\n$`
+	require.Eventually(t, func() bool {
+		content, err := os.ReadFile(logFile)
+		return err == nil && regexp.MustCompile(pattern).Match(content)
+	}, 5*time.Second, 50*time.Millisecond, "output should carry an RFC3339 timestamp and the job name")
+}
+
+func TestStartOncePrefixesOutputWithJobNameOnly(t *testing.T) {
+	job := &baseJob{}
+	err := job.init(&config.BaseJobConfig{
+		Name:             "name-only-job",
+		Command:          "sh",
+		Args:             []string{"-c", "echo hello"},
+		EnableNamePrefix: boolPtr(true),
+	})
+	require.NoError(t, err)
+
+	logFile := filepath.Join(t.TempDir(), "stdout.log")
+	out, err := os.Create(logFile)
+	require.NoError(t, err)
+	defer out.Close()
+	job.stdout = out
+	job.stderr = out
+
+	require.NoError(t, job.startOnce(context.Background(), nil))
+
+	require.Eventually(t, func() bool {
+		content, err := os.ReadFile(logFile)
+		return err == nil && string(content) == "[name-only-job] hello\n"
+	}, 5*time.Second, 50*time.Millisecond, "output should carry the job name and no timestamp")
 }
 
 func TestStartOnceReportsExpectedStopAsIntentional(t *testing.T) {

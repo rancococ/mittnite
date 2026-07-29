@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/mittwald/mittnite/internal/config"
@@ -19,6 +20,9 @@ import (
 
 const (
 	DefaultAPIAddress = "unix:///var/run/mittnite.sock"
+
+	envJobLogTimestamps = "MITTNITE_JOB_LOG_TIMESTAMPS"
+	envJobLogNamePrefix = "MITTNITE_JOB_LOG_NAME_PREFIX"
 )
 
 var (
@@ -27,6 +31,8 @@ var (
 	apiEnabled       bool
 	apiListenAddress string
 	keepRunning      bool
+	jobLogTimestamps bool
+	jobLogNamePrefix bool
 )
 
 func init() {
@@ -42,6 +48,26 @@ func init() {
 	up.PersistentFlags().BoolVarP(&apiEnabled, "api", "", false, "enables the api for remote or cli controlling")
 	up.PersistentFlags().StringVarP(&apiListenAddress, "api-listen-address", "", DefaultAPIAddress, fmt.Sprintf("listen address for the api. Defaults to %q", DefaultAPIAddress))
 	up.PersistentFlags().BoolVarP(&keepRunning, "keep-running", "k", false, "keep mittnite running even if no job is running anymore")
+	up.PersistentFlags().BoolVar(&jobLogTimestamps, "job-log-timestamps", envBool(envJobLogTimestamps), "prefix each output line of every job with a timestamp (RFC3339 unless the job configures a format); per-job enableTimestamps wins (env: "+envJobLogTimestamps+")")
+	up.PersistentFlags().BoolVar(&jobLogNamePrefix, "job-log-name-prefix", envBool(envJobLogNamePrefix), "prefix each output line of every job with the job's name; per-job enableNamePrefix wins (env: "+envJobLogNamePrefix+")")
+}
+
+// envBool interprets an environment variable as a boolean flag default; unset
+// or unparsable values count as false (the latter are warned about in Run,
+// since logging is not set up yet when flag defaults are evaluated).
+func envBool(key string) bool {
+	v, err := strconv.ParseBool(os.Getenv(key))
+	return err == nil && v
+}
+
+func warnUnparsableEnvBools() {
+	for _, key := range []string{envJobLogTimestamps, envJobLogNamePrefix} {
+		if v, ok := os.LookupEnv(key); ok {
+			if _, err := strconv.ParseBool(v); err != nil {
+				log.Warnf("ignoring environment variable %s: %q is not a boolean value", key, v)
+			}
+		}
+	}
 }
 
 var up = &cobra.Command{
@@ -67,9 +93,13 @@ var up = &cobra.Command{
 			}
 		}()
 
+		warnUnparsableEnvBools()
+
 		if err := ignitionConfig.GenerateFromConfigDir(configDir); err != nil {
 			return fmt.Errorf("failed while trying to generate ignition config from dir '%s': %w", configDir, err)
 		}
+
+		ignitionConfig.ApplyJobLogDefaults(jobLogTimestamps, jobLogNamePrefix)
 
 		if err := files.RenderFiles(ignitionConfig.Files); err != nil {
 			return fmt.Errorf("failed while rendering files from ignition config, err: %w", err)

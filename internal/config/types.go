@@ -95,12 +95,27 @@ type BaseJobConfig struct {
 	Controllable     bool     `hcl:"controllable" json:"controllable"`
 	WorkingDirectory string   `hcl:"workingDirectory" json:"workingDirectory,omitempty"`
 
-	// log config
+	// log config; the bool-pointers are tri-state: unset means "follow the
+	// global default" (see Ignition.ApplyJobLogDefaults), an explicit value
+	// always wins
 	Stdout                string `hcl:"stdout" json:"stdout,omitempty"`
 	Stderr                string `hcl:"stderr" json:"stderr,omitempty"`
-	EnableTimestamps      bool   `hcl:"enableTimestamps" json:"enableTimestamps"`
+	EnableTimestamps      *bool  `hcl:"enableTimestamps" json:"enableTimestamps"`
 	TimestampFormat       string `hcl:"timestampFormat" json:"timestampFormat"` // defaults to RFC3339
 	CustomTimestampFormat string `hcl:"customTimestampFormat" json:"customTimestampFormat"`
+	EnableNamePrefix      *bool  `hcl:"enableNamePrefix" json:"enableNamePrefix"`
+}
+
+// TimestampsEnabled reports whether the job's output lines should be prefixed
+// with a timestamp; an unset enableTimestamps counts as disabled.
+func (c *BaseJobConfig) TimestampsEnabled() bool {
+	return c.EnableTimestamps != nil && *c.EnableTimestamps
+}
+
+// NamePrefixEnabled reports whether the job's output lines should be prefixed
+// with the job name; an unset enableNamePrefix counts as disabled.
+func (c *BaseJobConfig) NamePrefixEnabled() bool {
+	return c.EnableNamePrefix != nil && *c.EnableNamePrefix
 }
 
 type Laziness struct {

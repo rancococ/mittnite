@@ -122,8 +122,9 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 	cmd.Env = os.Environ()
 	cmd.Dir = job.Config.WorkingDirectory
 
-	// pipe command's stdout and stderr through timestamp function if timestamps are enabled
-	// otherwise just redirect stdout and err to job.stdout and job.stderr
+	// pipe command's stdout and stderr through the line forwarder if the
+	// output is decorated with timestamps and/or the job name; otherwise just
+	// redirect stdout and err to job.stdout and job.stderr
 	//
 	// the pipes are created manually instead of via cmd.StdoutPipe, because
 	// cmd.Wait closes those as soon as the main process exits, racing the
@@ -132,7 +133,7 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 	// reader goroutines own the read ends and close them on EOF, which arrives
 	// once all child-side writers are gone.
 	var pipeWriteEnds []*os.File
-	if job.Config.EnableTimestamps {
+	if job.Config.TimestampsEnabled() || job.Config.NamePrefixEnabled() {
 		stdoutReader, stdoutWriter, err := os.Pipe()
 		if err != nil {
 			return fmt.Errorf("failed to create stdout pipe for process: %s", err.Error())
@@ -149,9 +150,18 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 		cmd.Stderr = stderrWriter
 		pipeWriteEnds = []*os.File{stdoutWriter, stderrWriter}
 
-		layout := job.resolveTimestampLayout(l)
-		go job.forwardOutput(stdoutReader, job.stdout, layout)
-		go job.forwardOutput(stderrReader, job.stderr, layout)
+		var layout string
+		if job.Config.TimestampsEnabled() {
+			layout = job.resolveTimestampLayout(l)
+		}
+
+		var namePrefix []byte
+		if job.Config.NamePrefixEnabled() {
+			namePrefix = []byte("[" + job.Config.Name + "] ")
+		}
+
+		go job.forwardOutput(stdoutReader, job.stdout, layout, namePrefix)
+		go job.forwardOutput(stderrReader, job.stderr, layout, namePrefix)
 	} else {
 		cmd.Stdout = job.stdout
 		cmd.Stderr = job.stderr
@@ -291,12 +301,13 @@ func (job *baseJob) resolveTimestampLayout(l *log.Entry) string {
 }
 
 // forwardOutput copies process output from r to w line by line, prefixing
-// each line with a timestamp in the given layout. Lines longer than the read
-// buffer are forwarded in chunks — the timestamp is only written at the start
-// of a line and the newline only at its end — so overlong lines are split
-// across writes instead of aborting the forwarding (bufio.Scanner's token
-// limit would; a stopped reader lets the pipe fill up and block the child).
-func (job *baseJob) forwardOutput(r io.ReadCloser, w io.Writer, timestampLayout string) {
+// each line with a timestamp in the given layout (if non-empty) followed by
+// the given job-name prefix (if non-empty). Lines longer than the read buffer
+// are forwarded in chunks — the prefixes are only written at the start of a
+// line and the newline only at its end — so overlong lines are split across
+// writes instead of aborting the forwarding (bufio.Scanner's token limit
+// would; a stopped reader lets the pipe fill up and block the child).
+func (job *baseJob) forwardOutput(r io.ReadCloser, w io.Writer, timestampLayout string, namePrefix []byte) {
 	defer r.Close()
 
 	l := log.WithField("job.name", job.Config.Name)
@@ -317,12 +328,15 @@ func (job *baseJob) forwardOutput(r io.ReadCloser, w io.Writer, timestampLayout 
 		}
 
 		lineBuffer.Reset()
-		if !continuation && timestampLayout != "" {
-			// reuse the time buffer to avoid per-line allocations
-			timeBuffer = time.Now().AppendFormat(timeBuffer[:0], timestampLayout)
-			lineBuffer.WriteByte('[')
-			lineBuffer.Write(timeBuffer)
-			lineBuffer.WriteString("] ")
+		if !continuation {
+			if timestampLayout != "" {
+				// reuse the time buffer to avoid per-line allocations
+				timeBuffer = time.Now().AppendFormat(timeBuffer[:0], timestampLayout)
+				lineBuffer.WriteByte('[')
+				lineBuffer.Write(timeBuffer)
+				lineBuffer.WriteString("] ")
+			}
+			lineBuffer.Write(namePrefix)
 		}
 		lineBuffer.Write(line)
 		if !isPrefix {

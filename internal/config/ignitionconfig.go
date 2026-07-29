@@ -43,3 +43,26 @@ func (ignitionConfig *Ignition) GenerateFromConfigDir(configDir string) error {
 
 	return nil
 }
+
+// ApplyJobLogDefaults materializes the global job-log switches on every job
+// and boot job that does not set the respective option itself; explicit
+// per-job values always win.
+func (ignitionConfig *Ignition) ApplyJobLogDefaults(timestamps, namePrefix bool) {
+	apply := func(c *BaseJobConfig) {
+		if c.EnableTimestamps == nil {
+			v := timestamps
+			c.EnableTimestamps = &v
+		}
+		if c.EnableNamePrefix == nil {
+			v := namePrefix
+			c.EnableNamePrefix = &v
+		}
+	}
+
+	for i := range ignitionConfig.Jobs {
+		apply(&ignitionConfig.Jobs[i].BaseJobConfig)
+	}
+	for i := range ignitionConfig.BootJobs {
+		apply(&ignitionConfig.BootJobs[i].BaseJobConfig)
+	}
+}
