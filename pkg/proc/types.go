@@ -147,6 +147,25 @@ func (job *baseJob) init(jobConfig *config.BaseJobConfig) {
 	job.SetPhase(JobPhaseReasonAwaitingReadiness)
 }
 
+// validateStdFiles opens and immediately closes the configured log files, so
+// broken log paths fail at config load without holding file handles;
+// startOnce is the single owner of the per-run handles.
+func validateStdFiles(jobConfig *config.BaseJobConfig) error {
+	for _, path := range []string{jobConfig.Stdout, jobConfig.Stderr} {
+		if path == "" {
+			continue
+		}
+
+		f, err := prepareStdFile(path)
+		if err != nil {
+			return err
+		}
+		f.Close()
+	}
+
+	return nil
+}
+
 func (job *baseJob) CreateAndOpenStdFile(jobConfig *config.BaseJobConfig) error {
 	if jobConfig.Stdout != "" {
 		stdout, err := prepareStdFile(jobConfig.Stdout)
@@ -179,10 +198,7 @@ func NewCommonJob(c *config.JobConfig) (*CommonJob, error) {
 
 	j.baseJob.init(&c.BaseJobConfig)
 
-	// opening the configured log files here as well surfaces broken log paths
-	// at config load; no-ops for unset stdout/stderr, so it is safe to call
-	// unconditionally (stderr may be configured without stdout)
-	if err := j.baseJob.CreateAndOpenStdFile(&c.BaseJobConfig); err != nil {
+	if err := validateStdFiles(&c.BaseJobConfig); err != nil {
 		return nil, err
 	}
 
@@ -198,7 +214,7 @@ func NewLazyJob(c *config.JobConfig) (*LazyJob, error) {
 
 	j.baseJob.init(&c.BaseJobConfig)
 
-	if err := j.baseJob.CreateAndOpenStdFile(&c.BaseJobConfig); err != nil {
+	if err := validateStdFiles(&c.BaseJobConfig); err != nil {
 		return nil, err
 	}
 

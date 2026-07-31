@@ -138,6 +138,32 @@ func TestNewBootJobInitializesStdStreams(t *testing.T) {
 	require.Same(t, os.Stderr, job.stderr)
 }
 
+// Construction validates configured log paths but must not keep the files
+// open: startOnce opens its own handles on every run and would overwrite the
+// constructor-opened pair without closing it, leaking the descriptors.
+func TestNewCommonJobValidatesLogTargetsWithoutKeepingThemOpen(t *testing.T) {
+	job, err := NewCommonJob(&config.JobConfig{
+		BaseJobConfig: config.BaseJobConfig{
+			Name:    "validated-job",
+			Command: "true",
+			Stdout:  filepath.Join(t.TempDir(), "stdout.log"),
+		},
+	})
+	require.NoError(t, err)
+	require.Same(t, os.Stdout, job.stdout, "no file handle should be held after construction")
+
+	parent := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(parent, nil, 0o644))
+	_, err = NewCommonJob(&config.JobConfig{
+		BaseJobConfig: config.BaseJobConfig{
+			Name:    "broken-target-job",
+			Command: "true",
+			Stdout:  filepath.Join(parent, "stdout.log"),
+		},
+	})
+	require.Error(t, err, "broken log paths should still fail at config load")
+}
+
 // A boot job's configured log files are only opened in startOnce, so an
 // unopenable path flows through Run's canFail handling instead of failing the
 // construction — which would abort mittnite's entire boot.
