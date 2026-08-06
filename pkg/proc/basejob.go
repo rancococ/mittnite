@@ -305,12 +305,13 @@ func (job *baseJob) closeStdFiles() {
 }
 
 // resolveTimestampLayout determines the timestamp layout for the job's log
-// output and logs the choice once per process start. timestamp.layout always
-// carries the effective Go time layout; timestamp.format the configured key.
+// output and logs the choice at debug level once per process start; only an
+// unknown configured format warns. timestamp.layout always carries the
+// effective Go time layout; timestamp.format the configured key.
 func (job *baseJob) resolveTimestampLayout(l *log.Entry) string {
 	if job.Config.CustomTimestampFormat != "" {
 		l.WithField("timestamp.layout", job.Config.CustomTimestampFormat).
-			Info("logging with custom timestamp layout")
+			Debug("logging with custom timestamp layout")
 		return job.Config.CustomTimestampFormat
 	}
 
@@ -330,7 +331,7 @@ func (job *baseJob) resolveTimestampLayout(l *log.Entry) string {
 
 	l.WithField("timestamp.format", format).
 		WithField("timestamp.layout", layout).
-		Info("logging with timestamp layout")
+		Debug("logging with timestamp layout")
 	return layout
 }
 

@@ -197,7 +197,8 @@ func TestBootJobWithUnopenableLogTargetHonorsCanFail(t *testing.T) {
 }
 
 // An unset timestampFormat is the documented default (RFC3339) and must not
-// trigger the unknown-format warning.
+// trigger the unknown-format warning — or any other log line above debug
+// level, since the resolution runs on every job (re)start.
 func TestResolveTimestampLayoutDefaultsToRFC3339WithoutWarning(t *testing.T) {
 	logHook := logtest.NewGlobal()
 	defer logHook.Reset()
@@ -207,8 +208,33 @@ func TestResolveTimestampLayoutDefaultsToRFC3339WithoutWarning(t *testing.T) {
 
 	require.Equal(t, time.RFC3339, layout)
 	for _, entry := range logHook.AllEntries() {
-		require.NotEqual(t, log.WarnLevel, entry.Level, "unexpected warning: %s", entry.Message)
+		require.GreaterOrEqual(t, entry.Level, log.DebugLevel,
+			"layout resolution must not log above debug: %s", entry.Message)
 	}
+}
+
+// The chosen layout is logged at debug level only, so restart loops do not
+// spam the info log with one layout line per start.
+func TestResolveTimestampLayoutLogsLayoutAtDebugOnly(t *testing.T) {
+	logHook := logtest.NewGlobal()
+	defer logHook.Reset()
+
+	previousLevel := log.GetLevel()
+	log.SetLevel(log.DebugLevel)
+	t.Cleanup(func() { log.SetLevel(previousLevel) })
+
+	job := &baseJob{Config: &config.BaseJobConfig{
+		Name:            "debug-layout-job",
+		TimestampFormat: "Kitchen",
+	}}
+	job.resolveTimestampLayout(log.WithField("job.name", job.Config.Name))
+
+	var messages []string
+	for _, entry := range logHook.AllEntries() {
+		require.Equal(t, log.DebugLevel, entry.Level, "unexpected level for: %s", entry.Message)
+		messages = append(messages, entry.Message)
+	}
+	require.Contains(t, messages, "logging with timestamp layout")
 }
 
 func TestResolveTimestampLayoutWarnsOnUnknownFormat(t *testing.T) {
