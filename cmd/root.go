@@ -38,9 +38,11 @@ var rootCmd = &cobra.Command{
 			}()
 		}
 	},
-	Run: func(cmd *cobra.Command, args []string) {
+	// delegate to up's RunE — up defines no Run, so calling up.Run here (as
+	// this fallback did until v2) crashed on a nil function
+	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Warn("Running 'mittnite' without any arguments - defaulting to 'up'. This behaviour may change in future releases!")
-		up.Run(cmd, args)
+		return up.RunE(cmd, args)
 	},
 }
 
