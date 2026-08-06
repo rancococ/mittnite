@@ -33,6 +33,7 @@ It offers the following features:
     - [Render a file on startup](#render-a-file-on-startup)
     - [Wait until a Redis connection is possible](#wait-until-a-redis-connection-is-possible)
   - [More examples](#more-examples)
+- [Migration to v2](#migration-to-v2)
 - [mittnitectl](#mittnitectl)
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -51,14 +52,16 @@ Usage:
   mittnite [command]
 
 Available Commands:
+  completion  Generate the autocompletion script for the specified shell
   help        Help about any command
-  renderfiles
-  up
+  renderfiles Renders configuration files
+  up          Render config files, start probes and processes
   version     Show extended information about the current version of mittnite
 
 Flags:
   -c, --config-dir string   set directory to where your .hcl-configs are located (default "/etc/mittnite.d")
   -h, --help                help for mittnite
+      --profile             enable pprof http server
 
 Use "mittnite [command] --help" for more information about a command.
 ```
@@ -151,17 +154,13 @@ job "foo" {
 }
 ```
 
-Additionally, you can enable timestamps for the output of a job using `enableTimestamps` and specify a custom format using `timestampFormat`.
-
-Formats are named after their constant name in the Golang [`time` package](https://pkg.go.dev/time#pkg-constants) (lookup table at the bottom). The default is `RFC3339`.
-
-You can also specify your own format by setting `customTimestampFormat` to a custom format string like "2006-01-02 15:04:05". Whatever is set in `timestampFormat` will be ignored in that case.
-
-With `enableNamePrefix`, each output line is prefixed with the job's name. When both options are enabled, the timestamp comes first:
+Job output is decorated by default: every output line of every job is prefixed with a timestamp and the job's name, in that order:
 
 ```
 [2026-07-24T10:28:52Z] [foo] some output line
 ```
+
+The two parts are controlled per job with `enableTimestamps` and `enableNamePrefix`. Timestamp formats are named after their constant name in the Golang [`time` package](https://pkg.go.dev/time#pkg-constants) (lookup table at the bottom) and selected with `timestampFormat`; the default is `RFC3339`. You can also specify your own format by setting `customTimestampFormat` to a custom format string like "2006-01-02 15:04:05". Whatever is set in `timestampFormat` will be ignored in that case.
 
 ```hcl
 job "foo" {
@@ -169,16 +168,16 @@ job "foo" {
   args = ["bar"]
   stdout = "/tmp/foo.log"
   stderr = "/tmp/foo-errors.log"
-  enableTimestamps = true
+  enableTimestamps = true      # default
   timestampFormat = "RFC3339"  # default
-  customTimestampFormat = ""  # default
-  enableNamePrefix = true  # defaults to false
+  customTimestampFormat = ""   # default
+  enableNamePrefix = true      # default
 }
 ```
 
-Both options can also be enabled globally for all jobs (including boot jobs) with `mittnite up --job-log-timestamps --job-log-name-prefix`, or via the environment variables `MITTNITE_JOB_LOG_TIMESTAMPS` and `MITTNITE_JOB_LOG_NAME_PREFIX`. An explicit per-job `enableTimestamps` / `enableNamePrefix` — including an explicit `false` — always wins over the global switch.
+Both options can be disabled globally for all jobs (including boot jobs) with `mittnite up --job-log-timestamps=false --job-log-name-prefix=false`, or by setting the environment variables `MITTNITE_JOB_LOG_TIMESTAMPS` / `MITTNITE_JOB_LOG_NAME_PREFIX` to `0`. An explicit per-job `enableTimestamps` / `enableNamePrefix` — including an explicit `false` — always wins over the global switch.
 
-With either option enabled, output is forwarded line by line. Single lines longer than 64 KiB are forwarded in multiple chunks; on a shared target, output of other jobs or streams may interleave between the chunks of such a line.
+With either option enabled, output is forwarded line by line. Single lines longer than 64 KiB are forwarded in multiple chunks; on a shared target, output of other jobs or streams may interleave between the chunks of such a line. Jobs that write binary data — or machine-parsed output such as JSON log lines, when the consumer cannot be taught the prefix — should disable both options: with both disabled, the job's output streams are attached directly and stay byte-identical.
 
 You can configure a Job to watch files and to send a signal to the managed process if that file changes. This can be used, for example, to send a `SIGHUP` to a process to reload its configuration file when it changes.
   
@@ -228,6 +227,8 @@ job "foo" {
 }
 ```
 
+The output of `preCommand`/`postCommand` is decorated with the owning job's timestamp/name prefix, following the same job-level settings as the job's own output.
+
 You can also configure a Job to start its process only on the first incoming request (a bit like [systemd's socket activation](https://www.freedesktop.org/software/systemd/man/systemd.socket.html)). In order to configure this, you need a `listener` and a `lazy` configuration:
 
 ```hcl
@@ -267,7 +268,7 @@ boot "setup" {
 }
 ```
 
-Boot jobs write to mittnite's stdout/stderr and support the same log options as regular jobs (`stdout`, `stderr`, `enableTimestamps`, `timestampFormat`, `customTimestampFormat`, `enableNamePrefix`).
+Boot jobs write to mittnite's stdout/stderr and support the same log options as regular jobs (`stdout`, `stderr`, `enableTimestamps`, `timestampFormat`, `customTimestampFormat`, `enableNamePrefix`) — including the same on-by-default decoration.
 
 #### File
 
@@ -448,6 +449,22 @@ probe redis {
 
 ### More examples
 More example files can be found in the [examples directory](examples/)
+
+## Migration to v2
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list of breaking changes.
+
+The headline change: **job output decoration is on by default**. Every output line of every job and boot job is prefixed with `[<RFC3339 timestamp>] [<job name>] `, and output is forwarded line by line through mittnite instead of being written directly by the process.
+
+To keep v1-identical output:
+
+- **Globally**: run `mittnite up --job-log-timestamps=false --job-log-name-prefix=false`, or set the environment variables `MITTNITE_JOB_LOG_TIMESTAMPS=0` and `MITTNITE_JOB_LOG_NAME_PREFIX=0`.
+- **Per job**: set `enableTimestamps = false` and `enableNamePrefix = false` in the job's configuration — explicit per-job values always win over the global switches. A job with both options disabled writes to its output targets directly again, byte-identical to v1.
+- **Defer the migration**: pin the image tag `quay.io/mittwald/mittnite:v1` (the `stable` and `latest` tags move to v2).
+
+Jobs that emit binary data or machine-parsed output (e.g. JSON log lines consumed by a strict log collector) should opt out per job.
+
+Also note: unset or unparsable `MITTNITE_JOB_LOG_*` environment variables now mean *enabled*; an unparsable value is warned about at startup together with the assumed default.
 
 ## mittnitectl
 
