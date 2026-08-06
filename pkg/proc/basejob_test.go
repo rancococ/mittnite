@@ -298,14 +298,16 @@ func TestForwardOutputHandlesOverlongLines(t *testing.T) {
 
 // A job with decoration explicitly disabled — the opt-out state after
 // ApplyJobLogDefaults materialized false onto it — keeps the raw fd
-// passthrough: output is byte-identical, nothing is piped through mittnite.
+// passthrough. The output deliberately has no trailing newline: the line
+// forwarder would append one, so byte-identical output here proves nothing
+// was piped through mittnite, not just that the decoration was empty.
 func TestStartOnceRawPassthroughWhenBothOptionsExplicitlyDisabled(t *testing.T) {
 	stdoutPath := filepath.Join(t.TempDir(), "stdout.log")
 
 	job := &baseJob{}
 	job.init(&config.BaseJobConfig{
 		Name:             "raw-job",
-		Command:          "echo",
+		Command:          "printf",
 		Args:             []string{"hello"},
 		EnableTimestamps: boolPtr(false),
 		EnableNamePrefix: boolPtr(false),
@@ -316,12 +318,14 @@ func TestStartOnceRawPassthroughWhenBothOptionsExplicitlyDisabled(t *testing.T) 
 
 	content, err := os.ReadFile(stdoutPath)
 	require.NoError(t, err)
-	require.Equal(t, "hello\n", string(content))
+	require.Equal(t, "hello", string(content))
 }
 
-// The up-level plumbing composed end to end: jobs and boot jobs without
-// explicit log options pick up the flipped global defaults via
-// ApplyJobLogDefaults and emit fully decorated output.
+// ApplyJobLogDefaults composed with the job constructors and startOnce: jobs
+// and boot jobs without explicit log options pick up the flipped global
+// defaults and emit fully decorated output. (The cmd/up wiring that passes
+// the flag values — after config generation — is covered by E2E runs, not
+// here.)
 func TestDefaultDecorationEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	jobOut := filepath.Join(dir, "job.log")

@@ -37,6 +37,7 @@ job "echoloop_kitchentime" {
   timestampFormat = "Kitchen"
 }
 
+# opts out of the default timestamps only; the name prefix stays on
 job "echoloop_notime" {
   command = "/bin/bash"
   args = [
@@ -46,6 +47,7 @@ job "echoloop_notime" {
 
   stdout = "test_notime.log"
   stderr = "test_notime_error.log"
+  enableTimestamps = false
 }
 
 # opts out of the default decoration entirely: output is written to the
