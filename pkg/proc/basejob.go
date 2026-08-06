@@ -355,6 +355,7 @@ func (job *baseJob) forwardOutput(r io.ReadCloser, w io.Writer, timestampLayout 
 	var timeBuffer []byte
 	var lineBuffer bytes.Buffer
 	continuation := false
+	writeFailed := false
 
 	for {
 		line, isPrefix, err := reader.ReadLine()
@@ -391,9 +392,16 @@ func (job *baseJob) forwardOutput(r io.ReadCloser, w io.Writer, timestampLayout 
 				w = io.Discard
 				continue
 			}
-			l.WithError(err).Error("error writing log line for process")
+			// a persistently broken target would otherwise be logged at
+			// the child's write rate; log once per failure streak and keep
+			// trying, so a recovered target resumes forwarding
+			if !writeFailed {
+				writeFailed = true
+				l.WithError(err).Error("error writing log line for process, suppressing repeated errors until a write succeeds")
+			}
 			continue
 		}
+		writeFailed = false
 	}
 }
 

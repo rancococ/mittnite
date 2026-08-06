@@ -296,6 +296,48 @@ func TestForwardOutputHandlesOverlongLines(t *testing.T) {
 	}
 }
 
+// flakyWriter fails or passes each write according to the per-call results
+// list (nil = success); writes beyond the list succeed.
+type flakyWriter struct {
+	results []error
+	buf     bytes.Buffer
+	calls   int
+}
+
+func (w *flakyWriter) Write(p []byte) (int, error) {
+	defer func() { w.calls++ }()
+	if w.calls < len(w.results) && w.results[w.calls] != nil {
+		return 0, w.results[w.calls]
+	}
+	w.buf.Write(p)
+	return len(p), nil
+}
+
+// A persistently failing log target must not be logged at the child's write
+// rate: one error per failure streak, and forwarding resumes when the target
+// recovers.
+func TestForwardOutputLogsPersistentWriteErrorsOncePerStreak(t *testing.T) {
+	logHook := logtest.NewGlobal()
+	defer logHook.Reset()
+
+	brokenTarget := fmt.Errorf("target broken")
+	w := &flakyWriter{results: []error{brokenTarget, brokenTarget, nil, brokenTarget, brokenTarget}}
+
+	job := &baseJob{Config: &config.BaseJobConfig{Name: "flaky-target-job"}}
+	job.forwardOutput(io.NopCloser(strings.NewReader("one\ntwo\nthree\nfour\nfive\n")),
+		w, "", []byte("[flaky-target-job] "))
+
+	errorCount := 0
+	for _, entry := range logHook.AllEntries() {
+		if entry.Level == log.ErrorLevel {
+			errorCount++
+		}
+	}
+	require.Equal(t, 2, errorCount, "expected one error per failure streak")
+	require.Equal(t, "[flaky-target-job] three\n", w.buf.String(),
+		"writes must still be attempted after failures")
+}
+
 // When the flush wait times out because a lingering child keeps the pipes
 // open, the forwarder goroutines outlive startOnce; a restart then reassigns
 // job.stdout/job.stderr via CreateAndOpenStdFile, so the forwarders must have
