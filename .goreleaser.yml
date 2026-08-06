@@ -61,6 +61,9 @@ changelog:
     exclude:
     - '^docs:'
     - '^test:'
+release:
+  header: |
+    > Upgrading across a major version? See [CHANGELOG.md](https://github.com/mittwald/mittnite/blob/master/CHANGELOG.md) for the breaking changes.
 dockers:
     -
       image_templates:

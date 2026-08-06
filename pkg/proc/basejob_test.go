@@ -197,7 +197,8 @@ func TestBootJobWithUnopenableLogTargetHonorsCanFail(t *testing.T) {
 }
 
 // An unset timestampFormat is the documented default (RFC3339) and must not
-// trigger the unknown-format warning.
+// trigger the unknown-format warning — or any other log line above debug
+// level, since the resolution runs on every job (re)start.
 func TestResolveTimestampLayoutDefaultsToRFC3339WithoutWarning(t *testing.T) {
 	logHook := logtest.NewGlobal()
 	defer logHook.Reset()
@@ -207,8 +208,33 @@ func TestResolveTimestampLayoutDefaultsToRFC3339WithoutWarning(t *testing.T) {
 
 	require.Equal(t, time.RFC3339, layout)
 	for _, entry := range logHook.AllEntries() {
-		require.NotEqual(t, log.WarnLevel, entry.Level, "unexpected warning: %s", entry.Message)
+		require.GreaterOrEqual(t, entry.Level, log.DebugLevel,
+			"layout resolution must not log above debug: %s", entry.Message)
 	}
+}
+
+// The chosen layout is logged at debug level only, so restart loops do not
+// spam the info log with one layout line per start.
+func TestResolveTimestampLayoutLogsLayoutAtDebugOnly(t *testing.T) {
+	logHook := logtest.NewGlobal()
+	defer logHook.Reset()
+
+	previousLevel := log.GetLevel()
+	log.SetLevel(log.DebugLevel)
+	t.Cleanup(func() { log.SetLevel(previousLevel) })
+
+	job := &baseJob{Config: &config.BaseJobConfig{
+		Name:            "debug-layout-job",
+		TimestampFormat: "Kitchen",
+	}}
+	job.resolveTimestampLayout(log.WithField("job.name", job.Config.Name))
+
+	var messages []string
+	for _, entry := range logHook.AllEntries() {
+		require.Equal(t, log.DebugLevel, entry.Level, "unexpected level for: %s", entry.Message)
+		messages = append(messages, entry.Message)
+	}
+	require.Contains(t, messages, "logging with timestamp layout")
 }
 
 func TestResolveTimestampLayoutWarnsOnUnknownFormat(t *testing.T) {
@@ -268,6 +294,121 @@ func TestForwardOutputHandlesOverlongLines(t *testing.T) {
 	for _, entry := range logHook.AllEntries() {
 		require.NotEqual(t, "error reading from process", entry.Message)
 	}
+}
+
+// A job with decoration explicitly disabled — the opt-out state after
+// ApplyJobLogDefaults materialized false onto it — keeps the raw fd
+// passthrough. The output deliberately has no trailing newline: the line
+// forwarder would append one, so byte-identical output here proves nothing
+// was piped through mittnite, not just that the decoration was empty.
+func TestStartOnceRawPassthroughWhenBothOptionsExplicitlyDisabled(t *testing.T) {
+	stdoutPath := filepath.Join(t.TempDir(), "stdout.log")
+
+	job := &baseJob{}
+	job.init(&config.BaseJobConfig{
+		Name:             "raw-job",
+		Command:          "printf",
+		Args:             []string{"hello"},
+		EnableTimestamps: boolPtr(false),
+		EnableNamePrefix: boolPtr(false),
+		Stdout:           stdoutPath,
+	})
+
+	require.NoError(t, job.startOnce(context.Background(), nil))
+
+	content, err := os.ReadFile(stdoutPath)
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(content))
+}
+
+// ApplyJobLogDefaults composed with the job constructors and startOnce: jobs
+// and boot jobs without explicit log options pick up the flipped global
+// defaults and emit fully decorated output. (The cmd/up wiring that passes
+// the flag values — after config generation — is covered by E2E runs, not
+// here.)
+func TestDefaultDecorationEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	jobOut := filepath.Join(dir, "job.log")
+	bootOut := filepath.Join(dir, "boot.log")
+
+	ignition := &config.Ignition{
+		Jobs: []config.JobConfig{{
+			BaseJobConfig: config.BaseJobConfig{
+				Name:    "default-job",
+				Command: "echo",
+				Args:    []string{"hello"},
+				Stdout:  jobOut,
+			},
+		}},
+		BootJobs: []config.BootJobConfig{{
+			BaseJobConfig: config.BaseJobConfig{
+				Name:    "default-boot",
+				Command: "echo",
+				Args:    []string{"ahoi"},
+				Stdout:  bootOut,
+			},
+		}},
+	}
+	ignition.ApplyJobLogDefaults(true, true)
+
+	commonJob, err := NewCommonJob(&ignition.Jobs[0])
+	require.NoError(t, err)
+	require.NoError(t, commonJob.startOnce(context.Background(), nil))
+
+	bootJob, err := NewBootJob(&ignition.BootJobs[0])
+	require.NoError(t, err)
+	require.NoError(t, bootJob.Run(context.Background()))
+
+	pattern := `^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})\] \[%s\] %s\n$`
+	content, err := os.ReadFile(jobOut)
+	require.NoError(t, err)
+	require.Regexp(t, fmt.Sprintf(pattern, "default-job", "hello"), string(content))
+
+	content, err = os.ReadFile(bootOut)
+	require.NoError(t, err)
+	require.Regexp(t, fmt.Sprintf(pattern, "default-boot", "ahoi"), string(content))
+}
+
+// flakyWriter fails or passes each write according to the per-call results
+// list (nil = success); writes beyond the list succeed.
+type flakyWriter struct {
+	results []error
+	buf     bytes.Buffer
+	calls   int
+}
+
+func (w *flakyWriter) Write(p []byte) (int, error) {
+	defer func() { w.calls++ }()
+	if w.calls < len(w.results) && w.results[w.calls] != nil {
+		return 0, w.results[w.calls]
+	}
+	w.buf.Write(p)
+	return len(p), nil
+}
+
+// A persistently failing log target must not be logged at the child's write
+// rate: one error per failure streak, and forwarding resumes when the target
+// recovers.
+func TestForwardOutputLogsPersistentWriteErrorsOncePerStreak(t *testing.T) {
+	logHook := logtest.NewGlobal()
+	defer logHook.Reset()
+
+	brokenTarget := fmt.Errorf("target broken")
+	w := &flakyWriter{results: []error{brokenTarget, brokenTarget, nil, brokenTarget, brokenTarget}}
+
+	job := &baseJob{Config: &config.BaseJobConfig{Name: "flaky-target-job"}}
+	job.forwardOutput(io.NopCloser(strings.NewReader("one\ntwo\nthree\nfour\nfive\n")),
+		w, "", []byte("[flaky-target-job] "))
+
+	errorCount := 0
+	for _, entry := range logHook.AllEntries() {
+		if entry.Level == log.ErrorLevel {
+			errorCount++
+		}
+	}
+	require.Equal(t, 2, errorCount, "expected one error per failure streak")
+	require.Equal(t, "[flaky-target-job] three\n", w.buf.String(),
+		"writes must still be attempted after failures")
 }
 
 // When the flush wait times out because a lingering child keeps the pipes

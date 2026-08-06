@@ -305,12 +305,13 @@ func (job *baseJob) closeStdFiles() {
 }
 
 // resolveTimestampLayout determines the timestamp layout for the job's log
-// output and logs the choice once per process start. timestamp.layout always
-// carries the effective Go time layout; timestamp.format the configured key.
+// output and logs the choice at debug level once per process start; only an
+// unknown configured format warns. timestamp.layout always carries the
+// effective Go time layout; timestamp.format the configured key.
 func (job *baseJob) resolveTimestampLayout(l *log.Entry) string {
 	if job.Config.CustomTimestampFormat != "" {
 		l.WithField("timestamp.layout", job.Config.CustomTimestampFormat).
-			Info("logging with custom timestamp layout")
+			Debug("logging with custom timestamp layout")
 		return job.Config.CustomTimestampFormat
 	}
 
@@ -330,7 +331,7 @@ func (job *baseJob) resolveTimestampLayout(l *log.Entry) string {
 
 	l.WithField("timestamp.format", format).
 		WithField("timestamp.layout", layout).
-		Info("logging with timestamp layout")
+		Debug("logging with timestamp layout")
 	return layout
 }
 
@@ -354,6 +355,7 @@ func (job *baseJob) forwardOutput(r io.ReadCloser, w io.Writer, timestampLayout 
 	var timeBuffer []byte
 	var lineBuffer bytes.Buffer
 	continuation := false
+	writeFailed := false
 
 	for {
 		line, isPrefix, err := reader.ReadLine()
@@ -390,10 +392,101 @@ func (job *baseJob) forwardOutput(r io.ReadCloser, w io.Writer, timestampLayout 
 				w = io.Discard
 				continue
 			}
-			l.WithError(err).Error("error writing log line for process")
+			// a persistently broken target would otherwise be logged at
+			// the child's write rate; log once per failure streak and keep
+			// trying, so a recovered target resumes forwarding
+			if !writeFailed {
+				writeFailed = true
+				l.WithError(err).Error("error writing log line for process, suppressing repeated errors until a write succeeds")
+			}
 			continue
 		}
+		writeFailed = false
 	}
+}
+
+// runCommandWithJobDecoration runs the already-configured cmd, forwarding its
+// output to the given targets with the job's timestamp/name decoration, so
+// auxiliary commands (watch pre/post commands) are attributable like the
+// job's own output. Without decoration — or when pipe creation fails — the
+// targets are attached directly. The forwarders get the same bounded drain
+// as startOnce; a child outliving the command keeps a forwarder running past
+// the return, which is safe because the targets are the process-wide streams
+// and never closed.
+func (job *baseJob) runCommandWithJobDecoration(cmd *exec.Cmd, stdout, stderr *os.File) error {
+	runDirect := func() error {
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+		return cmd.Run()
+	}
+
+	if !job.Config.TimestampsEnabled() && !job.Config.NamePrefixEnabled() {
+		return runDirect()
+	}
+
+	l := log.WithField("job.name", job.Config.Name)
+
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		return runDirect()
+	}
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		stdoutReader.Close()
+		stdoutWriter.Close()
+		return runDirect()
+	}
+
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+
+	var layout string
+	if job.Config.TimestampsEnabled() {
+		layout = job.resolveTimestampLayout(l)
+	}
+
+	var namePrefix []byte
+	if job.Config.NamePrefixEnabled() {
+		namePrefix = []byte("[" + job.Config.Name + "] ")
+	}
+
+	var forwardersDone sync.WaitGroup
+	forwardersDone.Add(2)
+	go func() {
+		defer forwardersDone.Done()
+		job.forwardOutput(stdoutReader, stdout, layout, namePrefix)
+	}()
+	go func() {
+		defer forwardersDone.Done()
+		job.forwardOutput(stderrReader, stderr, layout, namePrefix)
+	}()
+
+	runErr := cmd.Start()
+
+	// the started child holds duplicates of the pipe write ends; close ours
+	// so the forwarders see EOF once all child-side writers are gone
+	// (immediately, if the start failed)
+	stdoutWriter.Close()
+	stderrWriter.Close()
+
+	if runErr == nil {
+		runErr = cmd.Wait()
+	}
+
+	// bounded drain, like startOnce: EOF arrives right after cmd.Wait in the
+	// normal case, the cap only bites when the command forked children that
+	// keep the pipe write ends open
+	done := make(chan struct{})
+	go func() {
+		forwardersDone.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+	}
+
+	return runErr
 }
 
 func (job *baseJob) readStdFile(ctx context.Context, wg *sync.WaitGroup, filePath string, outChan chan []byte, errChan chan error, follow bool, tailLen int) {

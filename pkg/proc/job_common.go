@@ -239,8 +239,6 @@ func (job *CommonJob) executeWatchCommand(watchCmd *config.WatchCommand) error {
 		return errors.New("command is missing")
 	}
 	cmd := exec.Command(watchCmd.Command, watchCmd.Args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
 
 	if watchCmd.Env != nil {
@@ -249,7 +247,7 @@ func (job *CommonJob) executeWatchCommand(watchCmd *config.WatchCommand) error {
 
 	log.WithField("job.name", job.Config.Name).
 		Info("executing watch command")
-	return cmd.Run()
+	return job.runCommandWithJobDecoration(cmd, os.Stdout, os.Stderr)
 }
 
 func (job *CommonJob) crashLoopSleep(ctx context.Context, duration time.Duration) {
