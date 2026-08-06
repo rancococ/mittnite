@@ -122,8 +122,9 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 	cmd.Env = os.Environ()
 	cmd.Dir = job.Config.WorkingDirectory
 
-	// pipe command's stdout and stderr through timestamp function if timestamps are enabled
-	// otherwise just redirect stdout and err to job.stdout and job.stderr
+	// pipe command's stdout and stderr through the line forwarder if the
+	// output is decorated with timestamps and/or the job name; otherwise just
+	// redirect stdout and err to job.stdout and job.stderr
 	//
 	// the pipes are created manually instead of via cmd.StdoutPipe, because
 	// cmd.Wait closes those as soon as the main process exits, racing the
@@ -132,7 +133,7 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 	// reader goroutines own the read ends and close them on EOF, which arrives
 	// once all child-side writers are gone.
 	var pipeWriteEnds []*os.File
-	if job.Config.EnableTimestamps {
+	if job.Config.TimestampsEnabled() || job.Config.NamePrefixEnabled() {
 		stdoutReader, stdoutWriter, err := os.Pipe()
 		if err != nil {
 			return fmt.Errorf("failed to create stdout pipe for process: %s", err.Error())
@@ -149,9 +150,50 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 		cmd.Stderr = stderrWriter
 		pipeWriteEnds = []*os.File{stdoutWriter, stderrWriter}
 
-		layout := job.resolveTimestampLayout(l)
-		go job.logWithTimestamp(stdoutReader, job.stdout, layout)
-		go job.logWithTimestamp(stderrReader, job.stderr, layout)
+		var layout string
+		if job.Config.TimestampsEnabled() {
+			layout = job.resolveTimestampLayout(l)
+		}
+
+		var namePrefix []byte
+		if job.Config.NamePrefixEnabled() {
+			namePrefix = []byte("[" + job.Config.Name + "] ")
+		}
+
+		var forwardersDone sync.WaitGroup
+		forwardersDone.Add(2)
+		// capture the targets outside the closures: when the flush wait below
+		// times out, these goroutines outlive startOnce, and a restart's
+		// CreateAndOpenStdFile reassigns job.stdout/job.stderr unsynchronized
+		stdout, stderr := job.stdout, job.stderr
+		go func() {
+			defer forwardersDone.Done()
+			job.forwardOutput(stdoutReader, stdout, layout, namePrefix)
+		}()
+		go func() {
+			defer forwardersDone.Done()
+			job.forwardOutput(stderrReader, stderr, layout, namePrefix)
+		}()
+
+		// let the forwarders drain the job's remaining output before startOnce
+		// returns: the deferred closeStdFiles closes file-backed log targets,
+		// and after a failed boot job or on shutdown mittnite itself may exit
+		// right afterwards — either would cut off the job's final lines. The
+		// readers see EOF as soon as the last write end is gone, so the full
+		// second is only spent when children outlive the job — what they
+		// write within the window is still forwarded; into closed file
+		// targets, later output is discarded.
+		defer func() {
+			done := make(chan struct{})
+			go func() {
+				forwardersDone.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+			}
+		}()
 	} else {
 		cmd.Stdout = job.stdout
 		cmd.Stderr = job.stderr
@@ -249,8 +291,10 @@ func (job *baseJob) startOnce(ctx context.Context, process chan<- *os.Process) e
 }
 
 func (job *baseJob) closeStdFiles() {
-	hasStdout := len(job.Config.Stdout) > 0
-	hasStderr := len(job.Config.Stderr) > 0 && job.Config.Stderr != job.Config.Stdout
+	// when opening a configured log file failed, job.stdout/job.stderr still
+	// point at the process-wide streams — never close those
+	hasStdout := len(job.Config.Stdout) > 0 && job.stdout != os.Stdout
+	hasStderr := len(job.Config.Stderr) > 0 && job.Config.Stderr != job.Config.Stdout && job.stderr != os.Stderr
 	if hasStdout {
 		job.stdout.Close()
 	}
@@ -270,45 +314,72 @@ func (job *baseJob) resolveTimestampLayout(l *log.Entry) string {
 		return job.Config.CustomTimestampFormat
 	}
 
-	layout, exists := TimeLayouts[job.Config.TimestampFormat]
+	format := job.Config.TimestampFormat
+	if format == "" {
+		// documented default, must not hit the unknown-format warning below
+		format = "RFC3339"
+	}
+
+	layout, exists := TimeLayouts[format]
 	if !exists {
-		l.WithField("timestamp.format", job.Config.TimestampFormat).
+		l.WithField("timestamp.format", format).
 			WithField("timestamp.layout", time.RFC3339).
 			Warn("unknown timestamp format, defaulting to RFC3339")
 		return time.RFC3339
 	}
 
-	l.WithField("timestamp.format", job.Config.TimestampFormat).
+	l.WithField("timestamp.format", format).
 		WithField("timestamp.layout", layout).
 		Info("logging with timestamp layout")
 	return layout
 }
 
-func (job *baseJob) logWithTimestamp(r io.ReadCloser, w io.Writer, layout string) {
+// forwardOutput copies process output from r to w line by line, prefixing
+// each line with a timestamp in the given layout (if non-empty) followed by
+// the given job-name prefix (if non-empty). Lines longer than the read buffer
+// are forwarded in chunks — the prefixes are only written at the start of a
+// line and the newline only at its end — so overlong lines are split across
+// writes instead of aborting the forwarding (bufio.Scanner's token limit
+// would abort it, and closing the read end would then kill the child with
+// SIGPIPE on its next write). The chunks are separate writes, so on a target
+// shared with other forwarders, their output can interleave between the
+// chunks of an overlong line.
+func (job *baseJob) forwardOutput(r io.ReadCloser, w io.Writer, timestampLayout string, namePrefix []byte) {
 	defer r.Close()
 
 	l := log.WithField("job.name", job.Config.Name)
 
-	scanner := bufio.NewScanner(r)
-	prefix := []byte{'['}
-	suffix := []byte{']', ' '}
-	newline := []byte{'\n'}
+	reader := bufio.NewReaderSize(r, 64*1024)
 
 	var timeBuffer []byte
 	var lineBuffer bytes.Buffer
+	continuation := false
 
-	for scanner.Scan() {
-		// Reuse time buffer, completly avoiding allocations
-		timeBuffer = timeBuffer[:0]
-		timeBuffer = time.Now().AppendFormat(timeBuffer, layout)
+	for {
+		line, isPrefix, err := reader.ReadLine()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				l.WithError(err).Error("error reading from process")
+			}
+			return
+		}
 
-		// Reset line buffer
 		lineBuffer.Reset()
-		lineBuffer.Write(prefix)
-		lineBuffer.Write(timeBuffer)
-		lineBuffer.Write(suffix)
-		lineBuffer.Write(scanner.Bytes())
-		lineBuffer.Write(newline)
+		if !continuation {
+			if timestampLayout != "" {
+				// reuse the time buffer to avoid per-line allocations
+				timeBuffer = time.Now().AppendFormat(timeBuffer[:0], timestampLayout)
+				lineBuffer.WriteByte('[')
+				lineBuffer.Write(timeBuffer)
+				lineBuffer.WriteString("] ")
+			}
+			lineBuffer.Write(namePrefix)
+		}
+		lineBuffer.Write(line)
+		if !isPrefix {
+			lineBuffer.WriteByte('\n')
+		}
+		continuation = isPrefix
 
 		if _, err := w.Write(lineBuffer.Bytes()); err != nil {
 			if errors.Is(err, os.ErrClosed) {
@@ -322,10 +393,6 @@ func (job *baseJob) logWithTimestamp(r io.ReadCloser, w io.Writer, layout string
 			l.WithError(err).Error("error writing log line for process")
 			continue
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		l.WithError(err).Error("error reading from process")
 	}
 }
 

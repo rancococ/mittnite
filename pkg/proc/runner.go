@@ -43,7 +43,7 @@ func (r *Runner) Boot() error {
 	for j := range r.IgnitionConfig.BootJobs {
 		job, err := NewBootJob(&r.IgnitionConfig.BootJobs[j])
 		if err != nil {
-			return err
+			return fmt.Errorf("error initializing boot job %s: %w", r.IgnitionConfig.BootJobs[j].Name, err)
 		}
 
 		r.bootJobs = append(r.bootJobs, job)

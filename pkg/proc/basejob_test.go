@@ -1,30 +1,35 @@
 package proc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/mittwald/mittnite/internal/config"
+	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/require"
 )
+
+func boolPtr(b bool) *bool { return &b }
 
 func startTestJob(t *testing.T) (*baseJob, chan error) {
 	t.Helper()
 
 	job := &baseJob{}
-	err := job.init(&config.BaseJobConfig{
+	job.init(&config.BaseJobConfig{
 		Name:    "test-job",
 		Command: "sleep",
 		Args:    []string{"30"},
 	})
-	require.NoError(t, err)
 
 	// receiving from the process channel synchronizes with startOnce having
 	// set job.cmd, so the job can safely be signaled afterwards
@@ -53,16 +58,15 @@ func TestStartOnceKeepsLoggingOutputOfLingeringChildren(t *testing.T) {
 	defer logHook.Reset()
 
 	job := &baseJob{}
-	err := job.init(&config.BaseJobConfig{
+	job.init(&config.BaseJobConfig{
 		Name: "lingering-job",
 		// the child traps TERM because startOnce signals the job's process
 		// group once the main process has exited; the main process sleeps
 		// briefly so the trap is installed before the signal arrives
 		Command:          "sh",
 		Args:             []string{"-c", "(trap '' TERM; sleep 0.3; echo lingering) & echo main; sleep 0.2"},
-		EnableTimestamps: true,
+		EnableTimestamps: boolPtr(true),
 	})
-	require.NoError(t, err)
 
 	// stand-in for the passthrough case (job.stdout = os.Stdout), which
 	// closeStdFiles leaves open when startOnce returns
@@ -98,21 +102,21 @@ func TestStartOnceDrainsPipeAfterLogTargetCloses(t *testing.T) {
 	marker := filepath.Join(dir, "marker")
 
 	job := &baseJob{}
-	err := job.init(&config.BaseJobConfig{
+	job.init(&config.BaseJobConfig{
 		Name:    "draining-job",
 		Command: "sh",
-		// the second write happens well after the reader saw the closed log
-		// target; if the read end were closed by then, the write would raise
-		// SIGPIPE and the marker file would never be created. The main process
-		// sleeps briefly so the child has installed its TERM trap before
-		// startOnce signals the process group.
+		// the child outlives the one-second forwarder flush wait, so its
+		// second write happens well after the log target was closed; if the
+		// read end were closed by then, the write would raise SIGPIPE and the
+		// marker file would never be created. The main process sleeps briefly
+		// so the child has installed its TERM trap before startOnce signals
+		// the process group.
 		Args: []string{"-c", fmt.Sprintf(
-			"(trap '' TERM; sleep 0.3; echo lingering; sleep 0.3; echo again; : > %q) & echo main; sleep 0.2", marker,
+			"(trap '' TERM; sleep 0.3; echo lingering; sleep 1.2; echo again; : > %q) & echo main; sleep 0.2", marker,
 		)},
-		EnableTimestamps: true,
+		EnableTimestamps: boolPtr(true),
 		Stdout:           filepath.Join(dir, "stdout.log"),
 	})
-	require.NoError(t, err)
 
 	require.NoError(t, job.startOnce(context.Background(), nil))
 
@@ -120,6 +124,257 @@ func TestStartOnceDrainsPipeAfterLogTargetCloses(t *testing.T) {
 		_, err := os.Stat(marker)
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond, "lingering child should survive writing after the log target closed")
+}
+
+// Boot jobs used to skip baseJob.init, leaving job.stdout/job.stderr as typed
+// nil *os.File values; os/exec turns those into closed file descriptors in the
+// child, so all boot job output was silently lost.
+func TestNewBootJobInitializesStdStreams(t *testing.T) {
+	job, err := NewBootJob(&config.BootJobConfig{
+		BaseJobConfig: config.BaseJobConfig{Name: "boot-job", Command: "true"},
+	})
+	require.NoError(t, err)
+	require.Same(t, os.Stdout, job.stdout)
+	require.Same(t, os.Stderr, job.stderr)
+}
+
+// Construction validates configured log paths but must not keep the files
+// open: startOnce opens its own handles on every run and would overwrite the
+// constructor-opened pair without closing it, leaking the descriptors.
+func TestNewCommonJobValidatesLogTargetsWithoutKeepingThemOpen(t *testing.T) {
+	job, err := NewCommonJob(&config.JobConfig{
+		BaseJobConfig: config.BaseJobConfig{
+			Name:    "validated-job",
+			Command: "true",
+			Stdout:  filepath.Join(t.TempDir(), "stdout.log"),
+		},
+	})
+	require.NoError(t, err)
+	require.Same(t, os.Stdout, job.stdout, "no file handle should be held after construction")
+
+	parent := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(parent, nil, 0o644))
+	_, err = NewCommonJob(&config.JobConfig{
+		BaseJobConfig: config.BaseJobConfig{
+			Name:    "broken-target-job",
+			Command: "true",
+			Stdout:  filepath.Join(parent, "stdout.log"),
+		},
+	})
+	require.Error(t, err, "broken log paths should still fail at config load")
+}
+
+// A boot job's configured log files are only opened in startOnce, so an
+// unopenable path flows through Run's canFail handling instead of failing the
+// construction — which would abort mittnite's entire boot.
+func TestBootJobWithUnopenableLogTargetHonorsCanFail(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(parent, nil, 0o644))
+
+	newJob := func(canFail bool) *BootJob {
+		job, err := NewBootJob(&config.BootJobConfig{
+			BaseJobConfig: config.BaseJobConfig{
+				Name:    "boot-bad-log-job",
+				Command: "true",
+				CanFail: canFail,
+				Stdout:  filepath.Join(parent, "boot.log"),
+			},
+		})
+		require.NoError(t, err, "construction must not open the log target")
+		return job
+	}
+
+	require.NoError(t, newJob(true).Run(context.Background()),
+		"canFail must rescue the failing open")
+	require.Error(t, newJob(false).Run(context.Background()))
+
+	// the failed open left job.stdout/job.stderr pointing at the process-wide
+	// streams; closeStdFiles must not have closed those
+	_, err := os.Stdout.Stat()
+	require.NoError(t, err)
+	_, err = os.Stderr.Stat()
+	require.NoError(t, err)
+}
+
+// An unset timestampFormat is the documented default (RFC3339) and must not
+// trigger the unknown-format warning.
+func TestResolveTimestampLayoutDefaultsToRFC3339WithoutWarning(t *testing.T) {
+	logHook := logtest.NewGlobal()
+	defer logHook.Reset()
+
+	job := &baseJob{Config: &config.BaseJobConfig{Name: "default-format-job"}}
+	layout := job.resolveTimestampLayout(log.WithField("job.name", job.Config.Name))
+
+	require.Equal(t, time.RFC3339, layout)
+	for _, entry := range logHook.AllEntries() {
+		require.NotEqual(t, log.WarnLevel, entry.Level, "unexpected warning: %s", entry.Message)
+	}
+}
+
+func TestResolveTimestampLayoutWarnsOnUnknownFormat(t *testing.T) {
+	logHook := logtest.NewGlobal()
+	defer logHook.Reset()
+
+	job := &baseJob{Config: &config.BaseJobConfig{
+		Name:            "unknown-format-job",
+		TimestampFormat: "bogus",
+	}}
+	layout := job.resolveTimestampLayout(log.WithField("job.name", job.Config.Name))
+
+	require.Equal(t, time.RFC3339, layout)
+
+	var warnings []string
+	for _, entry := range logHook.AllEntries() {
+		if entry.Level == log.WarnLevel {
+			warnings = append(warnings, entry.Message)
+		}
+	}
+	require.Contains(t, warnings, "unknown timestamp format, defaulting to RFC3339")
+}
+
+func TestResolveTimestampLayoutPrefersCustomFormat(t *testing.T) {
+	job := &baseJob{Config: &config.BaseJobConfig{
+		Name:                  "custom-format-job",
+		TimestampFormat:       "Kitchen",
+		CustomTimestampFormat: "2006-01-02",
+	}}
+	layout := job.resolveTimestampLayout(log.WithField("job.name", job.Config.Name))
+
+	require.Equal(t, "2006-01-02", layout)
+}
+
+// forwardOutput must not abort on lines longer than its read buffer: the
+// timestamp and name prefix are written once per line, overlong lines arrive
+// in chunks, and empty as well as unterminated final lines are forwarded as
+// lines.
+func TestForwardOutputHandlesOverlongLines(t *testing.T) {
+	logHook := logtest.NewGlobal()
+	defer logHook.Reset()
+
+	payload := strings.Repeat("a", 200*1024)
+	input := "first\n" + payload + "\n\nlast"
+
+	var buf bytes.Buffer
+	job := &baseJob{Config: &config.BaseJobConfig{Name: "long-line-job"}}
+	// the layout contains no time components, so the expected output is
+	// deterministic while the timestamp code path is still exercised
+	job.forwardOutput(io.NopCloser(strings.NewReader(input)), &buf, "T", []byte("[long-line-job] "))
+
+	prefix := "[T] [long-line-job] "
+	require.Equal(t,
+		prefix+"first\n"+prefix+payload+"\n"+prefix+"\n"+prefix+"last\n",
+		buf.String())
+
+	for _, entry := range logHook.AllEntries() {
+		require.NotEqual(t, "error reading from process", entry.Message)
+	}
+}
+
+// When the flush wait times out because a lingering child keeps the pipes
+// open, the forwarder goroutines outlive startOnce; a restart then reassigns
+// job.stdout/job.stderr via CreateAndOpenStdFile, so the forwarders must have
+// captured their targets with a proper happens-before edge (only fails under
+// -race).
+func TestStartOnceRestartDoesNotRaceWithLingeringForwarders(t *testing.T) {
+	job := &baseJob{}
+	job.init(&config.BaseJobConfig{
+		Name:    "restart-race-job",
+		Command: "sh",
+		// the child ignores TERM and holds the inherited pipe write ends open
+		// well past the flush wait without writing, so the forwarders never
+		// see EOF before the restart; the main process sleeps briefly so the
+		// trap is installed before startOnce signals the process group
+		Args:             []string{"-c", "(trap '' TERM; sleep 3) & sleep 0.2"},
+		EnableTimestamps: boolPtr(true),
+		Stdout:           filepath.Join(t.TempDir(), "stdout.log"),
+	})
+
+	start := time.Now()
+	require.NoError(t, job.startOnce(context.Background(), nil))
+	// immediate restart, like CommonJob.Run does after ProcessWillBeRestartedError
+	require.NoError(t, job.startOnce(context.Background(), nil))
+
+	// the flush wait is capped at one second per start; an unbounded wait
+	// would block on each child's 3s pipe hold and take over six seconds
+	require.Less(t, time.Since(start), 4500*time.Millisecond)
+}
+
+// With a file-backed log target, startOnce waits for the forwarders to drain
+// the job's own final output into the file before closeStdFiles closes it;
+// the last lines of a job must not race into the discard path.
+func TestStartOnceFlushesFileTargetBeforeReturning(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "stdout.log")
+
+	job := &baseJob{}
+	job.init(&config.BaseJobConfig{
+		Name:             "flush-job",
+		Command:          "sh",
+		Args:             []string{"-c", "echo final-line"},
+		EnableTimestamps: boolPtr(true),
+		EnableNamePrefix: boolPtr(true),
+		Stdout:           logFile,
+	})
+
+	require.NoError(t, job.startOnce(context.Background(), nil))
+
+	// deliberately no Eventually: the file must be complete when startOnce
+	// has returned
+	content, err := os.ReadFile(logFile)
+	require.NoError(t, err)
+	require.Regexp(t, `^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})\] \[flush-job\] final-line\n$`, string(content))
+}
+
+func TestStartOncePrefixesOutputWithTimestampAndJobName(t *testing.T) {
+	job := &baseJob{}
+	job.init(&config.BaseJobConfig{
+		Name:             "prefix-job",
+		Command:          "sh",
+		Args:             []string{"-c", "echo hello"},
+		EnableTimestamps: boolPtr(true),
+		EnableNamePrefix: boolPtr(true),
+	})
+
+	// stand-in for the passthrough case (job.stdout = os.Stdout), which
+	// closeStdFiles leaves open when startOnce returns
+	logFile := filepath.Join(t.TempDir(), "stdout.log")
+	out, err := os.Create(logFile)
+	require.NoError(t, err)
+	defer out.Close()
+	job.stdout = out
+	job.stderr = out
+
+	require.NoError(t, job.startOnce(context.Background(), nil))
+
+	// the forwarder goroutine may still be flushing when startOnce returns
+	pattern := `^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})\] \[prefix-job\] hello\n$`
+	require.Eventually(t, func() bool {
+		content, err := os.ReadFile(logFile)
+		return err == nil && regexp.MustCompile(pattern).Match(content)
+	}, 5*time.Second, 50*time.Millisecond, "output should carry an RFC3339 timestamp and the job name")
+}
+
+func TestStartOncePrefixesOutputWithJobNameOnly(t *testing.T) {
+	job := &baseJob{}
+	job.init(&config.BaseJobConfig{
+		Name:             "name-only-job",
+		Command:          "sh",
+		Args:             []string{"-c", "echo hello"},
+		EnableNamePrefix: boolPtr(true),
+	})
+
+	logFile := filepath.Join(t.TempDir(), "stdout.log")
+	out, err := os.Create(logFile)
+	require.NoError(t, err)
+	defer out.Close()
+	job.stdout = out
+	job.stderr = out
+
+	require.NoError(t, job.startOnce(context.Background(), nil))
+
+	require.Eventually(t, func() bool {
+		content, err := os.ReadFile(logFile)
+		return err == nil && string(content) == "[name-only-job] hello\n"
+	}, 5*time.Second, 50*time.Millisecond, "output should carry the job name and no timestamp")
 }
 
 func TestStartOnceReportsExpectedStopAsIntentional(t *testing.T) {

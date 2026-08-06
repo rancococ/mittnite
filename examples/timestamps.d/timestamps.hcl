@@ -47,3 +47,15 @@ job "echoloop_notime" {
   stdout = "test_notime.log"
   stderr = "test_notime_error.log"
 }
+job "echoloop_nameprefix" {
+  command = "/bin/bash"
+  args = [
+    "-c",
+    "while true ; do echo 'test'; sleep 10; done"
+  ]
+
+  stdout = "test_nameprefix.log"
+  stderr = "test_nameprefix_error.log"
+  enableTimestamps = true
+  enableNamePrefix = true
+}
