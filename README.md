@@ -464,7 +464,7 @@ To keep v1-identical output:
 
 Jobs that emit binary data or machine-parsed output (e.g. JSON log lines consumed by a strict log collector) should opt out per job.
 
-Also note: unset or unparsable `MITTNITE_JOB_LOG_*` environment variables now mean *enabled*; an unparsable value is warned about at startup together with the assumed default.
+Also note: unset or unparsable `MITTNITE_JOB_LOG_*` environment variables now mean *enabled*; an unparsable value is warned about at startup together with the effective value.
 
 ## mittnitectl
 

@@ -68,14 +68,17 @@ func envBool(key string, defaultValue bool) bool {
 	return v
 }
 
+// warnUnparsableEnvBools runs after flag parsing, so it reports the effective
+// flag value — the built-in default, unless an explicit --job-log-* flag
+// overrode it.
 func warnUnparsableEnvBools() {
-	for key, defaultValue := range map[string]bool{
-		envJobLogTimestamps: defaultJobLogTimestamps,
-		envJobLogNamePrefix: defaultJobLogNamePrefix,
+	for key, effective := range map[string]bool{
+		envJobLogTimestamps: jobLogTimestamps,
+		envJobLogNamePrefix: jobLogNamePrefix,
 	} {
 		if v, ok := os.LookupEnv(key); ok {
 			if _, err := strconv.ParseBool(v); err != nil {
-				log.Warnf("ignoring environment variable %s: %q is not a boolean value, using default %t", key, v, defaultValue)
+				log.Warnf("ignoring environment variable %s: %q is not a boolean value, the effective value is %t", key, v, effective)
 			}
 		}
 	}

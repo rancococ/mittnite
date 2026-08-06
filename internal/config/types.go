@@ -107,13 +107,16 @@ type BaseJobConfig struct {
 }
 
 // TimestampsEnabled reports whether the job's output lines should be prefixed
-// with a timestamp; an unset enableTimestamps counts as disabled.
+// with a timestamp. The global default is expected to have been materialized
+// onto an unset enableTimestamps first (Ignition.ApplyJobLogDefaults, which
+// `up` runs at startup); a still-nil value counts as disabled.
 func (c *BaseJobConfig) TimestampsEnabled() bool {
 	return c.EnableTimestamps != nil && *c.EnableTimestamps
 }
 
 // NamePrefixEnabled reports whether the job's output lines should be prefixed
-// with the job name; an unset enableNamePrefix counts as disabled.
+// with the job name; like TimestampsEnabled, it reads the materialized value
+// and a still-nil enableNamePrefix counts as disabled.
 func (c *BaseJobConfig) NamePrefixEnabled() bool {
 	return c.EnableNamePrefix != nil && *c.EnableNamePrefix
 }

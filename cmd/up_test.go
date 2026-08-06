@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -56,8 +57,8 @@ func TestWarnUnparsableEnvBools(t *testing.T) {
 	}
 	require.Len(t, warnings, 1, "only the unparsable variable should be warned about")
 	require.Contains(t, warnings[0], envJobLogTimestamps)
-	require.Contains(t, warnings[0], "using default true",
-		"the warning must state the assumed value, since unparsable now means on")
+	require.Contains(t, warnings[0], fmt.Sprintf("the effective value is %t", jobLogTimestamps),
+		"the warning must state the effective value, since unparsable now means on")
 }
 
 // Job output decoration is on by default since v2.0.0. The flag defaults are
