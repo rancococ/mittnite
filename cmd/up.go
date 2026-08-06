@@ -23,6 +23,11 @@ const (
 
 	envJobLogTimestamps = "MITTNITE_JOB_LOG_TIMESTAMPS"
 	envJobLogNamePrefix = "MITTNITE_JOB_LOG_NAME_PREFIX"
+
+	// job output decoration is on by default since v2.0.0; see the
+	// migration section in the README
+	defaultJobLogTimestamps = true
+	defaultJobLogNamePrefix = true
 )
 
 var (
@@ -48,23 +53,29 @@ func init() {
 	up.PersistentFlags().BoolVarP(&apiEnabled, "api", "", false, "enables the api for remote or cli controlling")
 	up.PersistentFlags().StringVarP(&apiListenAddress, "api-listen-address", "", DefaultAPIAddress, fmt.Sprintf("listen address for the api. Defaults to %q", DefaultAPIAddress))
 	up.PersistentFlags().BoolVarP(&keepRunning, "keep-running", "k", false, "keep mittnite running even if no job is running anymore")
-	up.PersistentFlags().BoolVar(&jobLogTimestamps, "job-log-timestamps", envBool(envJobLogTimestamps), "prefix each output line of every job with a timestamp (RFC3339 unless the job configures a format); per-job enableTimestamps wins (env: "+envJobLogTimestamps+")")
-	up.PersistentFlags().BoolVar(&jobLogNamePrefix, "job-log-name-prefix", envBool(envJobLogNamePrefix), "prefix each output line of every job with the job's name; per-job enableNamePrefix wins (env: "+envJobLogNamePrefix+")")
+	up.PersistentFlags().BoolVar(&jobLogTimestamps, "job-log-timestamps", envBool(envJobLogTimestamps, defaultJobLogTimestamps), "prefix each output line of every job with a timestamp (RFC3339 unless the job configures a format); disable globally with --job-log-timestamps=false or "+envJobLogTimestamps+"=0; an explicit per-job enableTimestamps wins")
+	up.PersistentFlags().BoolVar(&jobLogNamePrefix, "job-log-name-prefix", envBool(envJobLogNamePrefix, defaultJobLogNamePrefix), "prefix each output line of every job with the job's name; disable globally with --job-log-name-prefix=false or "+envJobLogNamePrefix+"=0; an explicit per-job enableNamePrefix wins")
 }
 
 // envBool interprets an environment variable as a boolean flag default; unset
-// or unparsable values count as false (the latter are warned about in Run,
-// since logging is not set up yet when flag defaults are evaluated).
-func envBool(key string) bool {
+// or unparsable values fall back to defaultValue (the latter are warned about
+// in Run, since logging is not set up yet when flag defaults are evaluated).
+func envBool(key string, defaultValue bool) bool {
 	v, err := strconv.ParseBool(os.Getenv(key))
-	return err == nil && v
+	if err != nil {
+		return defaultValue
+	}
+	return v
 }
 
 func warnUnparsableEnvBools() {
-	for _, key := range []string{envJobLogTimestamps, envJobLogNamePrefix} {
+	for key, defaultValue := range map[string]bool{
+		envJobLogTimestamps: defaultJobLogTimestamps,
+		envJobLogNamePrefix: defaultJobLogNamePrefix,
+	} {
 		if v, ok := os.LookupEnv(key); ok {
 			if _, err := strconv.ParseBool(v); err != nil {
-				log.Warnf("ignoring environment variable %s: %q is not a boolean value", key, v)
+				log.Warnf("ignoring environment variable %s: %q is not a boolean value, using default %t", key, v, defaultValue)
 			}
 		}
 	}

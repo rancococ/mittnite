@@ -296,6 +296,75 @@ func TestForwardOutputHandlesOverlongLines(t *testing.T) {
 	}
 }
 
+// A job with decoration explicitly disabled — the opt-out state after
+// ApplyJobLogDefaults materialized false onto it — keeps the raw fd
+// passthrough: output is byte-identical, nothing is piped through mittnite.
+func TestStartOnceRawPassthroughWhenBothOptionsExplicitlyDisabled(t *testing.T) {
+	stdoutPath := filepath.Join(t.TempDir(), "stdout.log")
+
+	job := &baseJob{}
+	job.init(&config.BaseJobConfig{
+		Name:             "raw-job",
+		Command:          "echo",
+		Args:             []string{"hello"},
+		EnableTimestamps: boolPtr(false),
+		EnableNamePrefix: boolPtr(false),
+		Stdout:           stdoutPath,
+	})
+
+	require.NoError(t, job.startOnce(context.Background(), nil))
+
+	content, err := os.ReadFile(stdoutPath)
+	require.NoError(t, err)
+	require.Equal(t, "hello\n", string(content))
+}
+
+// The up-level plumbing composed end to end: jobs and boot jobs without
+// explicit log options pick up the flipped global defaults via
+// ApplyJobLogDefaults and emit fully decorated output.
+func TestDefaultDecorationEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	jobOut := filepath.Join(dir, "job.log")
+	bootOut := filepath.Join(dir, "boot.log")
+
+	ignition := &config.Ignition{
+		Jobs: []config.JobConfig{{
+			BaseJobConfig: config.BaseJobConfig{
+				Name:    "default-job",
+				Command: "echo",
+				Args:    []string{"hello"},
+				Stdout:  jobOut,
+			},
+		}},
+		BootJobs: []config.BootJobConfig{{
+			BaseJobConfig: config.BaseJobConfig{
+				Name:    "default-boot",
+				Command: "echo",
+				Args:    []string{"ahoi"},
+				Stdout:  bootOut,
+			},
+		}},
+	}
+	ignition.ApplyJobLogDefaults(true, true)
+
+	commonJob, err := NewCommonJob(&ignition.Jobs[0])
+	require.NoError(t, err)
+	require.NoError(t, commonJob.startOnce(context.Background(), nil))
+
+	bootJob, err := NewBootJob(&ignition.BootJobs[0])
+	require.NoError(t, err)
+	require.NoError(t, bootJob.Run(context.Background()))
+
+	pattern := `^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})\] \[%s\] %s\n$`
+	content, err := os.ReadFile(jobOut)
+	require.NoError(t, err)
+	require.Regexp(t, fmt.Sprintf(pattern, "default-job", "hello"), string(content))
+
+	content, err = os.ReadFile(bootOut)
+	require.NoError(t, err)
+	require.Regexp(t, fmt.Sprintf(pattern, "default-boot", "ahoi"), string(content))
+}
+
 // flakyWriter fails or passes each write according to the per-call results
 // list (nil = success); writes beyond the list succeed.
 type flakyWriter struct {
